@@ -1,0 +1,80 @@
+﻿{
+    "course":  "Stanford CS336 Spring 2026",
+    "course_url":  "https://cs336.stanford.edu/",
+    "imported_date":  "2026-10-20",
+    "timezone":  "Asia/Shanghai",
+    "method":  "Official GitHub ZIP snapshots; upstream files preserved",
+    "assignments":  [
+                        {
+                            "directory":  "assignment1-basics",
+                            "repository":  "https://github.com/stanford-cs336/assignment1-basics",
+                            "requested_ref":  "main",
+                            "commit":  "a158843b20107949f1a8d7df1b05cd33b9166712",
+                            "archive_url":  "https://codeload.github.com/stanford-cs336/assignment1-basics/zip/refs/heads/main",
+                            "immutable_archive_url":  "https://codeload.github.com/stanford-cs336/assignment1-basics/zip/a158843b20107949f1a8d7df1b05cd33b9166712",
+                            "archive_sha256":  "8d3f2f0e336ce72e101ac24b6b1a326942199501351a1ac431dd9e6b00c2acdf",
+                            "project_version":  "26.0.0",
+                            "verified_files":  51,
+                            "handouts":  [
+                                             "cs336_assignment1_basics.pdf"
+                                         ]
+                        },
+                        {
+                            "directory":  "assignment2-systems",
+                            "repository":  "https://github.com/stanford-cs336/assignment2-systems",
+                            "requested_ref":  "main",
+                            "commit":  "ca8bc81a59b70516f7ebb2da4808daade877c736",
+                            "archive_url":  "https://codeload.github.com/stanford-cs336/assignment2-systems/zip/refs/heads/main",
+                            "immutable_archive_url":  "https://codeload.github.com/stanford-cs336/assignment2-systems/zip/ca8bc81a59b70516f7ebb2da4808daade877c736",
+                            "archive_sha256":  "c092fbdfacf836da5293b67db664f9086bcfe08d66190359f7fd6b6c0d3bc151",
+                            "project_version":  "26.1.4",
+                            "verified_files":  28,
+                            "handouts":  [
+                                             "cs336_assignment2_systems.pdf"
+                                         ]
+                        },
+                        {
+                            "directory":  "assignment3-scaling",
+                            "repository":  "https://github.com/stanford-cs336/assignment3-scaling",
+                            "requested_ref":  "main",
+                            "commit":  "03e9372992e913061b9e78b5cfcb62ad8a87de35",
+                            "archive_url":  "https://codeload.github.com/stanford-cs336/assignment3-scaling/zip/refs/heads/main",
+                            "immutable_archive_url":  "https://codeload.github.com/stanford-cs336/assignment3-scaling/zip/03e9372992e913061b9e78b5cfcb62ad8a87de35",
+                            "archive_sha256":  "fe238105e3fc83c0422cfb8bce671bd18cbb5787640afe6b3724c9ca1f37e717",
+                            "project_version":  "26.0.2",
+                            "verified_files":  60,
+                            "handouts":  [
+                                             "cs336_assignment3_scaling.pdf"
+                                         ]
+                        },
+                        {
+                            "directory":  "assignment4-data",
+                            "repository":  "https://github.com/stanford-cs336/assignment4-data",
+                            "requested_ref":  "main",
+                            "commit":  "0555bea66369872d912652debf10b115ca0688c8",
+                            "archive_url":  "https://codeload.github.com/stanford-cs336/assignment4-data/zip/refs/heads/main",
+                            "immutable_archive_url":  "https://codeload.github.com/stanford-cs336/assignment4-data/zip/0555bea66369872d912652debf10b115ca0688c8",
+                            "archive_sha256":  "d0ce2552b15741305ac3201d400a0d21fdccdcccbd135ebba33e77716e7f923c",
+                            "project_version":  "26.0.0",
+                            "verified_files":  52,
+                            "handouts":  [
+                                             "cs336_assignment4_data.pdf"
+                                         ]
+                        },
+                        {
+                            "directory":  "assignment5-alignment",
+                            "repository":  "https://github.com/stanford-cs336/assignment5-alignment",
+                            "requested_ref":  "main",
+                            "commit":  "c2734a26308710949fe13226960a1e8cece94b7e",
+                            "archive_url":  "https://codeload.github.com/stanford-cs336/assignment5-alignment/zip/refs/heads/main",
+                            "immutable_archive_url":  "https://codeload.github.com/stanford-cs336/assignment5-alignment/zip/c2734a26308710949fe13226960a1e8cece94b7e",
+                            "archive_sha256":  "5c31a410201117cf4f52d36ad1bfd5d901fe23b6bb99a61b7fa243c613c320cc",
+                            "project_version":  "1.0.0",
+                            "verified_files":  257,
+                            "handouts":  [
+                                             "cs336_spring2026_assignment5_alignment.pdf",
+                                             "cs336_spring2026_assignment5_supplement_safety_rlhf.pdf"
+                                         ]
+                        }
+                    ]
+}

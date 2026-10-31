@@ -1,0 +1,14 @@
+# Normalize source files while preserving byte-sensitive test resources.
+* text=auto
+
+*.pdf binary
+*.pt binary
+*.pth binary
+*.npz binary
+*.npy binary
+*.pkl binary
+*.safetensors binary
+*.gz binary
+
+**/tests/fixtures/** -text
+**/tests/_snapshots/** -text
