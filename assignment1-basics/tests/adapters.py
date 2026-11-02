@@ -13,6 +13,7 @@ from torch import Tensor
 from cs336_basics.embedding import Embedding
 from cs336_basics.fast_train_bpe import train_bpe
 from cs336_basics.tokenizer import Tokenizer
+from cs336_basics.rmsnorm import RMSNorm
 
 
 def run_linear(
@@ -388,7 +389,14 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: 对 `in_features` 应用 RMSNorm 后的输出张量，
         形状与 `in_features` 相同。
     """
-    raise NotImplementedError
+    rmsnorm = RMSNorm(
+        d_model = d_model,
+        eps = eps,
+        device = weights.device,
+        dtype = weights.dtype,
+    )
+    rmsnorm.load_state_dict({"weight":weights})
+    return rmsnorm(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
