@@ -22,8 +22,8 @@ def run_linear(
     给定 Linear 层的权重，计算批量输入经过线性变换后的结果。
 
     参数：
-        in_dim (int): 输入维度的大小。
-        out_dim (int): 输出维度的大小。
+        d_in (int): 输入维度的大小。
+        d_out (int): 输出维度的大小。
         weights (Float[Tensor, "d_out d_in"]): 使用的线性层权重。
         in_features (Float[Tensor, "... d_in"]): 待应用此函数的特征张量。
 
@@ -31,6 +31,12 @@ def run_linear(
         Float[Tensor, "... d_out"]: 线性模块变换后的输出。
     """
 
+    # TODO 1：从 cs336_basics.linear 导入你完成的 Linear 类。
+    # TODO 2：根据 d_in、d_out 构造模块；设备和数据类型应与 weights 一致。
+    # TODO 3：将给定 weights 加载到模块的 weight 参数中。
+    #         可以使用 load_state_dict，注意状态字典的键与参数名称一致。
+    #         测试应使用传入的权重，而不是模块随机初始化得到的权重。
+    # TODO 4：将 in_features 交给模块计算，并返回输出张量。
     raise NotImplementedError
 
 
@@ -53,6 +59,12 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Embedding 层返回的一批嵌入向量。
     """
 
+    # TODO 1：从 cs336_basics.embedding 导入你完成的 Embedding 类。
+    # TODO 2：根据 vocab_size、d_model 构造模块；设备和数据类型应与 weights 一致。
+    #         token_ids 是整数索引，不能用它的数据类型来创建浮点嵌入权重。
+    # TODO 3：将给定 weights 加载到模块的 weight 参数中。
+    #         可以使用 load_state_dict，测试应使用给定权重完成查询。
+    # TODO 4：将 token_ids 交给模块查询，并返回嵌入张量。
     raise NotImplementedError
 
 
