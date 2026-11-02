@@ -14,6 +14,8 @@ from cs336_basics.embedding import Embedding
 from cs336_basics.fast_train_bpe import train_bpe
 from cs336_basics.tokenizer import Tokenizer
 from cs336_basics.rmsnorm import RMSNorm
+from cs336_basics.rope import RotaryPositionalEmbedding
+from cs336_basics.swiglu import SwiGLU, silu
 
 
 def run_linear(
@@ -96,14 +98,20 @@ def run_swiglu(
     返回值：
         Float[Tensor, "... d_model"]: 与输入嵌入形状相同的输出嵌入。
     """
-    # 示例：
-    # 如果状态字典中的键与你的实现一致，可以使用 `load_state_dict()`
-    # swiglu.load_state_dict(weights)
-    # 也可以手动赋值权重
-    # swiglu.w1.weight.data = w1_weight
-    # swiglu.w2.weight.data = w2_weight
-    # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    swiglu = SwiGLU(
+        d_model,
+        d_ff,
+        device=w1_weight.device,
+        dtype=w1_weight.dtype,
+    )
+    swiglu.load_state_dict(
+        {
+            "w1.weight": w1_weight,
+            "w2.weight": w2_weight,
+            "w3.weight": w3_weight,
+        }
+    )
+    return swiglu(in_features)
 
 
 def run_scaled_dot_product_attention(
@@ -217,7 +225,13 @@ def run_rope(
     返回值：
         Float[Tensor, " ... sequence_length d_k"]: 对输入应用 RoPE 后得到的张量。
     """
-    raise NotImplementedError
+    rope = RotaryPositionalEmbedding(
+        theta=theta,
+        d_k=d_k,
+        max_seq_len=max_seq_len,
+        device=in_query_or_key.device,
+    )
+    return rope(in_query_or_key, token_positions)
 
 
 def run_transformer_block(
@@ -409,7 +423,7 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         Float[Tensor,"..."]: 对每个元素应用 SiLU 后的输出张量，
         形状与 `in_features` 相同。
     """
-    raise NotImplementedError
+    return silu(in_features)
 
 
 def run_get_batch(

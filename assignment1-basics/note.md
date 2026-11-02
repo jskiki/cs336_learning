@@ -29,6 +29,8 @@ git push
 
 6.linear.py
 
+7.swiglu.py
+
 
 
 

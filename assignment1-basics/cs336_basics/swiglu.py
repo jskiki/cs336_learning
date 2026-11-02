@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-
+from cs336_basics.linear import Linear
 
 def silu(x: torch.Tensor) -> torch.Tensor:
     """应用 SiLU 激活函数，输入和输出的形状相同。
@@ -59,8 +59,12 @@ class SwiGLU(nn.Module):
         super().__init__()
         self.d_model = d_model
         # TODO 2：确定并保存 self.d_ff，处理未显式指定 d_ff 的情况。
+        ## 将 8/3 * d_model 向上取整到 64 的倍数。
+        self.d_ff = ((8*d_model+191)//192) * 64 if d_ff is None else d_ff
         # TODO 3：创建三个无偏置线性层，注意 w2 的输入和输出维度。
-        raise NotImplementedError("请完成 SwiGLU 的维度配置和线性层构造")
+        self.w1 = Linear(d_model, self.d_ff, device=device, dtype=dtype)
+        self.w2 = Linear(self.d_ff, d_model, device=device, dtype=dtype)
+        self.w3 = Linear(d_model, self.d_ff, device=device, dtype=dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """将 (..., d_model) 的输入变换为同样形状的输出。
@@ -72,4 +76,4 @@ class SwiGLU(nn.Module):
             保留输入和所有权重的自动求导。
         """
         # TODO 4：实现 SwiGLU 的前向计算。
-        raise NotImplementedError("请实现 SwiGLU 前向计算")
+        return self.w2(silu(self.w1(x)) * self.w3(x))
