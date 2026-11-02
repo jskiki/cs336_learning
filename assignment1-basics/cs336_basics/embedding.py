@@ -2,6 +2,8 @@
 
 请完成各处 TODO，再接入 tests/adapters.py 中的 run_embedding。
 验证命令：uv run pytest -k test_embedding
+
+权重矩阵与整个网络一块训练
 """
 
 from __future__ import annotations
@@ -39,11 +41,29 @@ class Embedding(nn.Module):
             标准差为 1，截断范围为 [-3, 3]。
         """
         # TODO 1：调用 nn.Module 的父类构造函数。
+        super().__init__()
         # TODO 2：保存词表大小和嵌入维度，方便后续检查模块配置。
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
         # TODO 3：创建约定形状的嵌入矩阵，并以 nn.Parameter 注册为 self.weight。
         #         权重应使用浮点类型，并遵循传入的 device 和 dtype。
+        self.weight = nn.Parameter(
+            torch.empty(
+                num_embeddings,
+                embedding_dim,
+                device=device,
+                dtype=dtype,
+            )
+        )
         # TODO 4：按上述截断正态分布初始化嵌入矩阵。
-        raise NotImplementedError("请完成 Embedding 的参数创建与初始化")
+        nn.init.trunc_normal_(
+            self.weight,
+            mean=0.0,
+            std=1.0,
+            a=-3.0,
+            b=3.0,
+        )
+        
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         """为每个 token ID 返回对应的嵌入向量。
@@ -58,4 +78,4 @@ class Embedding(nn.Module):
         """
         # TODO 5：根据 token ID 查询嵌入矩阵，保留原有索引维度与顺序。
         # TODO 6：检查输出形状是否等于输入形状追加一个嵌入维度。
-        raise NotImplementedError("请完成 Embedding.forward")
+        return self.weight[token_ids]

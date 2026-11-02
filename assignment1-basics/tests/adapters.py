@@ -10,8 +10,11 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 #from cs336_basics.train_bpe import train_bpe
+from cs336_basics.embedding import Embedding
 from cs336_basics.fast_train_bpe import train_bpe
 from cs336_basics.tokenizer import Tokenizer
+
+
 def run_linear(
     d_in: int,
     d_out: int,
@@ -59,13 +62,16 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Embedding 层返回的一批嵌入向量。
     """
 
-    # TODO 1：从 cs336_basics.embedding 导入你完成的 Embedding 类。
-    # TODO 2：根据 vocab_size、d_model 构造模块；设备和数据类型应与 weights 一致。
-    #         token_ids 是整数索引，不能用它的数据类型来创建浮点嵌入权重。
-    # TODO 3：将给定 weights 加载到模块的 weight 参数中。
-    #         可以使用 load_state_dict，测试应使用给定权重完成查询。
-    # TODO 4：将 token_ids 交给模块查询，并返回嵌入张量。
-    raise NotImplementedError
+    # 权重是浮点数，设备和数据类型取自 weights，而不是整数 token_ids。
+    embedding = Embedding(
+        vocab_size,
+        d_model,
+        device=weights.device,
+        dtype=weights.dtype,
+    )
+    # 使用测试提供的权重覆盖随机初始化的参数。
+    embedding.load_state_dict({"weight": weights})
+    return embedding(token_ids)
 
 
 def run_swiglu(
