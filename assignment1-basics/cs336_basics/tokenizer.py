@@ -5,9 +5,10 @@
 """
 from __future__ import annotations
 
-import regex
 import pickle
 from collections.abc import Iterable, Iterator
+
+import regex
 
 
 class Tokenizer:
@@ -115,7 +116,7 @@ class Tokenizer:
         # TODO：区分特殊标记与普通文本，处理特殊标记有共同前缀的情况。
         # TODO：对普通文本预分词，转换为 UTF-8 字节并应用已有的合并规则。
         # TODO：将得到的 token 字节串映射为 ID，按输入顺序返回。
-        from heapq import heapify,heappop,heappush
+        from heapq import heapify, heappop, heappush
         
         if not text:
             return []
