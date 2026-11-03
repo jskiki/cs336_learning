@@ -19,6 +19,7 @@ from cs336_basics.swiglu import SwiGLU, silu
 from cs336_basics.softmax import softmax
 from cs336_basics.attention import MultiHeadSelfAttention, scaled_dot_product_attention
 from cs336_basics.transformer_block import TransformerBlock
+from cs336_basics.transformer_lm import TransformerLM
 
 
 def run_linear(
@@ -427,7 +428,19 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: 包含每个 token 位置的
         下一个词预测结果的张量，预测结果为未归一化的分布。
     """
-    raise NotImplementedError
+    model = TransformerLM(
+        vocab_size=vocab_size,
+        context_length=context_length,
+        d_model=d_model,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        rope_theta=rope_theta,
+        device=in_indices.device,
+        dtype=weights["token_embeddings.weight"].dtype,
+    )
+    model.load_state_dict(weights)
+    return model(in_indices)
 
 
 def run_rmsnorm(
