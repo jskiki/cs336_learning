@@ -16,6 +16,8 @@ from cs336_basics.tokenizer import Tokenizer
 from cs336_basics.rmsnorm import RMSNorm
 from cs336_basics.rope import RotaryPositionalEmbedding
 from cs336_basics.swiglu import SwiGLU, silu
+from cs336_basics.softmax import softmax
+from cs336_basics.attention import scaled_dot_product_attention
 
 
 def run_linear(
@@ -131,7 +133,7 @@ def run_scaled_dot_product_attention(
     返回值：
         Float[Tensor, " ... queries d_v"]: 缩放点积注意力（SDPA）的输出。
     """
-    raise NotImplementedError
+    return scaled_dot_product_attention(Q, K, V, mask)
 
 
 def run_multihead_self_attention(
@@ -459,7 +461,7 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: 沿指定维度 `dim` 进行 softmax 归一化后的张量，
         形状与 `in_features` 相同。
     """
-    raise NotImplementedError
+    return softmax(in_features, dim)
 
 
 def run_cross_entropy(
