@@ -15,6 +15,7 @@ class RMSNorm(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.eps = eps
+        #可学习的缩放参数，对于输入x的最后一维的每个位置都有不同的缩放
         self.weight = nn.Parameter(
             torch.ones(d_model,device=device,dtype=dtype)
         )

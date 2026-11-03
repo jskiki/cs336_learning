@@ -18,6 +18,7 @@ from cs336_basics.rope import RotaryPositionalEmbedding
 from cs336_basics.swiglu import SwiGLU, silu
 from cs336_basics.softmax import softmax
 from cs336_basics.attention import MultiHeadSelfAttention, scaled_dot_product_attention
+from cs336_basics.transformer_block import TransformerBlock
 
 
 def run_linear(
@@ -336,7 +337,17 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] 使用 RoPE，
         对输入特征运行 Transformer 块后得到的输出张量。
     """
-    raise NotImplementedError
+    block = TransformerBlock(
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        max_seq_len=max_seq_len,
+        theta=theta,
+        device=in_features.device,
+        dtype=in_features.dtype,
+    )
+    block.load_state_dict(weights)
+    return block(in_features)
 
 
 def run_transformer_lm(
