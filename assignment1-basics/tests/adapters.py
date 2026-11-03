@@ -17,7 +17,7 @@ from cs336_basics.rmsnorm import RMSNorm
 from cs336_basics.rope import RotaryPositionalEmbedding
 from cs336_basics.swiglu import SwiGLU, silu
 from cs336_basics.softmax import softmax
-from cs336_basics.attention import scaled_dot_product_attention
+from cs336_basics.attention import MultiHeadSelfAttention, scaled_dot_product_attention
 
 
 def run_linear(
@@ -147,15 +147,14 @@ def run_multihead_self_attention(
 ) -> Float[Tensor, " ... sequence_length d_model"]:
     """
     给定朴素、未批处理的多头注意力实现中的键、查询和值投影权重，
-    返回经过优化的批处理实现的输出。该实现应通过一次矩阵乘法，
-    完成所有注意力头的键、查询和值投影。
+    返回经过优化的批处理实现的输出。每种输入投影应通过一次矩阵乘法
+    覆盖所有注意力头，Q、K、V 共三次输入投影。
     此函数不应使用 RoPE。
     参见 Vaswani 等人于 2017 年发表的论文第 3.2.2 节。
 
     参数：
         d_model (int): 前馈网络输入和输出的维度。
         num_heads (int): 多头注意力使用的注意力头数量。
-        max_seq_len (int): 如果实现使用预缓存，则表示预缓存的最大序列长度。
         q_proj_weight (Float[Tensor, "d_model d_model"]): Q 投影的权重。
         k_proj_weight (Float[Tensor, "d_model d_model"]): K 投影的权重。
         v_proj_weight (Float[Tensor, "d_model d_model"]): V 投影的权重。
@@ -166,7 +165,21 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_model"]: 使用给定的 QKV 投影权重和输入特征，
         运行经过优化的批处理多头注意力实现后得到的输出张量。
     """
-    raise NotImplementedError
+    attention = MultiHeadSelfAttention(
+        d_model=d_model,
+        num_heads=num_heads,
+        device=q_proj_weight.device,
+        dtype=q_proj_weight.dtype,
+    )
+    attention.load_state_dict(
+        {
+            "q_proj.weight": q_proj_weight,
+            "k_proj.weight": k_proj_weight,
+            "v_proj.weight": v_proj_weight,
+            "output_proj.weight": o_proj_weight,
+        }
+    )
+    return attention(in_features)
 
 
 def run_multihead_self_attention_with_rope(
@@ -183,8 +196,8 @@ def run_multihead_self_attention_with_rope(
 ) -> Float[Tensor, " ... sequence_length d_model"]:
     """
     给定朴素、未批处理的多头注意力实现中的键、查询和值投影权重，
-    返回经过优化的批处理实现的输出。该实现应通过一次矩阵乘法，
-    完成所有注意力头的键、查询和值投影。
+    返回经过优化的批处理实现的输出。每种输入投影应通过一次矩阵乘法
+    覆盖所有注意力头，Q、K、V 共三次输入投影。
     此版本的多头注意力（MHA）应包含 RoPE。
     此时，RoPE 的嵌入维度必须等于每个注意力头的嵌入维度（d_model // num_heads）。
     参见 Vaswani 等人于 2017 年发表的论文第 3.2.2 节。
@@ -205,7 +218,27 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_model"]: 使用给定的 QKV 投影权重和输入特征，
         运行经过优化的批处理多头注意力实现后得到的输出张量。
     """
-    raise NotImplementedError
+    attention = MultiHeadSelfAttention(
+        d_model=d_model,
+        num_heads=num_heads,
+        rope=RotaryPositionalEmbedding(
+            theta=theta,
+            d_k=d_model // num_heads,
+            max_seq_len=max_seq_len,
+            device=q_proj_weight.device,
+        ),
+        device=q_proj_weight.device,
+        dtype=q_proj_weight.dtype,
+    )
+    attention.load_state_dict(
+        {
+            "q_proj.weight": q_proj_weight,
+            "k_proj.weight": k_proj_weight,
+            "v_proj.weight": v_proj_weight,
+            "output_proj.weight": o_proj_weight,
+        }
+    )
+    return attention(in_features, token_positions)
 
 
 def run_rope(
