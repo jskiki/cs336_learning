@@ -10,6 +10,7 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 #from cs336_basics.train_bpe import train_bpe
+from cs336_basics.cross_entropy import cross_entropy
 from cs336_basics.embedding import Embedding
 from cs336_basics.fast_train_bpe import train_bpe
 from cs336_basics.tokenizer import Tokenizer
@@ -535,7 +536,7 @@ def run_cross_entropy(
     返回值：
         Float[Tensor, ""]: 所有样本的平均交叉熵损失。
     """
-    raise NotImplementedError
+    return cross_entropy(inputs, targets)
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:

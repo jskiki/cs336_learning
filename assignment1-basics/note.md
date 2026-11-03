@@ -43,3 +43,155 @@ nn.ModuleList 会将其中的块注册为子模块，这样 PyTorch 才能：
 - 通过 model.parameters() 找到它们的参数。
 - 在 state_dict() 中生成 layers.0.*、layers.1.* 等权重名称。
 - 随整个模型统一迁移设备和数据类型。
+
+
+
+### 交叉熵损失函数的详细解释
+
+```py
+def cross_entropy(inputs: Tensor, targets: Tensor) -> Tensor:
+    """根据预测 logits 和目标 token ID，返回平均交叉熵损失。
+
+    参数：
+        inputs: 未经 softmax 的浮点 logits，形状为 (..., vocab_size)。
+        targets: 整数类别索引，形状为 (...)，与 inputs 的前导维度一致。
+            每个索引在 [0, vocab_size) 内，与 inputs 位于同一设备。
+
+    返回值：
+        对所有前导维度取平均后的标量 Tensor，形状为 ()。
+        例如 inputs 为 (batch_size, seq_len, vocab_size) 时，
+        targets 为 (batch_size, seq_len)，每个 token 位置参与平均。
+
+    完成标准：
+        按题目要求减去最大元素，保证数值稳定性。
+        尽可能消去相互抵消的 log 和 exp 运算。
+        支持任意数量的前导批次维度，最后一维始终是词表维度。
+        不原地修改输入，保留从损失到 inputs 的 autograd 计算图。
+    """
+    # 平移量只用于数值稳定；视为常量不会改变损失对 logits 的梯度。
+    #detach():得到一个与inputs共享数据。但脱离自动求导计算图的张量。它不复制数据，也不会让原来的 inputs 停止计算梯度。keepdim保留维度进行广播
+    shifted = inputs - inputs.detach().amax(dim=-1, keepdim=True)
+    #targets.unsqueeze(-1):在最后一维添加一个维度。shifted.gather(dim=-1, index=...)：沿最后一维按索引取值。
+    #
+    target_logits = shifted.gather(dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)
+    log_normalizer = shifted.exp().sum(dim=-1).log()
+    return (log_normalizer - target_logits).mean()
+
+```
+
+假设 **batch 中有 2 条序列，每条有 3 个预测位置，词表里有 4 个 token**：
+
+```
+# inputs.shape = (2, 3, 4)
+# 分别对应：(batch_size, seq_len, vocab_size)
+inputs = torch.tensor([
+    [
+        [1.0, 2.0, 3.0, 4.0],  # 第 1 条序列，第 1 个位置
+        [4.0, 3.0, 2.0, 1.0],  # 第 1 条序列，第 2 个位置
+        [1.0, 3.0, 2.0, 0.0],  # 第 1 条序列，第 3 个位置
+    ],
+    [
+        [2.0, 1.0, 4.0, 3.0],  # 第 2 条序列，第 1 个位置
+        [0.0, 2.0, 1.0, 3.0],  # 第 2 条序列，第 2 个位置
+        [3.0, 1.0, 0.0, 2.0],  # 第 2 条序列，第 3 个位置
+    ],
+])
+
+# targets.shape = (2, 3)
+# 每个位置的正确 token ID，范围是 0～3
+targets = torch.tensor([
+    [3, 0, 1],
+    [2, 1, 0],
+])
+```
+
+例如，`targets[1, 1] = 1` 表示：**第 2 条序列的第 2 个位置，正确答案是词表中 ID 为 1 的 token**，对应的原始分数为 `inputs[1, 1, 1] = 2.0`。
+
+减去每个位置的最大值后：
+
+```
+# shifted.shape = (2, 3, 4)
+shifted = tensor([
+    [
+        [-3., -2., -1.,  0.],
+        [ 0., -1., -2., -3.],
+        [-2.,  0., -1., -3.],
+    ],
+    [
+        [-2., -3.,  0., -1.],
+        [-3., -1., -2.,  0.],
+        [ 0., -2., -3., -1.],
+    ],
+])
+```
+
+`targets.unsqueeze(-1)` 把每个目标索引放进一个长度为 1 的维度：
+
+```
+# 形状：(2, 3, 1)
+tensor([
+    [[3], [0], [1]],
+    [[2], [1], [0]],
+])
+```
+
+接着执行：
+
+```
+shifted.gather(dim=-1, index=targets.unsqueeze(-1))
+```
+
+得到：
+
+```
+# 形状：(2, 3, 1)
+tensor([
+    [[ 0.], [ 0.], [ 0.]],
+    [[ 0.], [-1.], [ 0.]],
+])
+```
+
+也就是**每个位置从 4 个词表分数中，按照 targets 选出 1 个分数**。再 `.squeeze(-1)`，形状就变成 `(2, 3)`。
+
+这句代码计算的是：**每个位置的所有词表分数先取指数，再求和，最后取自然对数**。
+
+\[ \text{log\_normalizer} = \log\left(\sum_{a=1}^{\text{vocab\_size}}e^{\text{shifted}[a]}\right) \]
+
+分三步看。假设某个位置有 3 个词表分数：
+
+```
+shifted = tensor([-2.0, -1.0, 0.0])
+```
+
+1. **`.exp()`**：逐元素计算 \(e^x\)。
+
+   ```
+   tensor([0.1353, 0.3679, 1.0000])
+   ```
+
+2. **`.sum(dim=-1)`**：沿最后的词表维度求和。
+
+   ```
+   tensor(1.5032)
+   ```
+
+3. **`.log()`**：对结果取自然对数。
+
+   ```
+   tensor(0.4076)
+   ```
+
+如果 `shifted` 的形状为 `(batch_size, seq_len, vocab_size)`，形状变化为：
+
+```
+shifted                  (batch_size, seq_len, vocab_size)
+.exp()                   (batch_size, seq_len, vocab_size)
+.sum(dim=-1)             (batch_size, seq_len)
+.log()                   (batch_size, seq_len)
+```
+
+它为什么出现在交叉熵中？因为：
+
+\[ -\log\frac{e^{z_y}}{\sum_a e^{z_a}} = \underbrace{\log\sum_a e^{z_a}}_{\text{log\_normalizer}} - \underbrace{z_y}_{\text{target\_logits}}. \]
+
+所以，下一句 `log_normalizer - target_logits` 就得到**每个位置的交叉熵损失**。
