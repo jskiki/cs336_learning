@@ -10,6 +10,7 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 #from cs336_basics.train_bpe import train_bpe
+from cs336_basics.adamw import AdamW
 from cs336_basics.cross_entropy import cross_entropy
 from cs336_basics.embedding import Embedding
 from cs336_basics.fast_train_bpe import train_bpe
@@ -551,11 +552,11 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
     raise NotImplementedError
 
 
-def get_adamw_cls() -> Any:
+def get_adamw_cls() -> type[AdamW]:
     """
     返回一个实现 AdamW 算法的 torch.optim.Optimizer 优化器类。
     """
-    raise NotImplementedError
+    return AdamW
 
 
 def run_get_lr_cosine_schedule(
