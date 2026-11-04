@@ -12,6 +12,7 @@ from torch import Tensor
 #from cs336_basics.train_bpe import train_bpe
 from cs336_basics.adamw import AdamW
 from cs336_basics.cross_entropy import cross_entropy
+from cs336_basics.data import get_batch
 from cs336_basics.embedding import Embedding
 from cs336_basics.fast_train_bpe import train_bpe
 from cs336_basics.gradient_clipping import gradient_clipping
@@ -507,7 +508,12 @@ def run_get_batch(
         由两个形状均为 (batch_size, context_length) 的 torch.LongTensor 组成的元组。
         第一个元素是采样得到的输入序列，第二个元素是对应的语言模型训练标签。
     """
-    raise NotImplementedError
+    return get_batch(
+        dataset=dataset,
+        batch_size=batch_size,
+        context_length=context_length,
+        device=device,
+    )
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:

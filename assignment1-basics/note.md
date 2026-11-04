@@ -195,3 +195,113 @@ shifted                  (batch_size, seq_len, vocab_size)
 \[ -\log\frac{e^{z_y}}{\sum_a e^{z_a}} = \underbrace{\log\sum_a e^{z_a}}_{\text{log\_normalizer}} - \underbrace{z_y}_{\text{target\_logits}}. \]
 
 所以，下一句 `log_normalizer - target_logits` 就得到**每个位置的交叉熵损失**。
+
+
+
+
+
+## np.memmap
+
+：数据保存在磁盘文件中，但你可以像操作普通数组一样，通过索引和切片访问它，无须预先把整个文件读入内存。[NumPy 官方文档](https://numpy.org/doc/stable/reference/generated/numpy.memmap.html)
+
+例如，你有一个 20 GB 的 token 文件，而机器只有 8 GB 内存。通过内存映射，可以先建立文件与虚拟地址空间的映射；访问某段数据时，操作系统再按需将相关的内存页载入物理内存。因此，**建立映射不等于把整个文件加载到内存中**。
+
+理解它时，有几个关键点：
+
+- **使用方式接近普通数组。** 可以查看形状、读取元素、获取切片；`np.memmap` 本身是 `np.ndarray` 的子类。
+- **`dtype` 决定如何解释文件里的字节。** 如果原始文件保存的是 `uint16`，读取时却指定 `int32`，就会按错误方式解释数据，而不是自动完成类型转换。
+- **训练数据通常使用只读模式 `mode='r'`。** 另外，`'r+'` 允许修改原文件，`'w+'` 会创建或覆盖文件。
+- **它依然会占用内存。** 访问的数据需要进入内存；将数据复制成新数组，也会产生额外内存开销。[参数与模式说明](https://numpy.org/doc/stable/reference/generated/numpy.memmap.html)
+
+加载方式取决于文件格式：
+
+| 文件格式                                  | 对应方式                                                     |
+| ----------------------------------------- | ------------------------------------------------------------ |
+| 原始二进制文件，例如直接保存的 token 字节 | 使用 `np.memmap`，自行指定正确的 `dtype`，必要时指定形状和偏移量 |
+| 由 `np.save` 保存的 `.npy` 文件           | 使用 `np.load`，设置 `mmap_mode='r'`，由文件头提供形状和类型信息 |
+
+`.npy` 文件包含文件头，不能直接把整个文件当作纯 token 字节来解释。[`np.load` 官方文档](https://numpy.org/doc/stable/reference/generated/numpy.load.html)
+
+结合你的作业，**内存映射应在调用 `get_batch` 之前完成**。`get_batch` 接收到的 `dataset` 可以是普通数组，也可以是映射数组；它只需访问本批次所需的数据，再生成指定设备上的张量。这样，完整数据集留在磁盘上，训练时按批次读取。
+
+
+
+## 关于data.py里部分代码的解释
+
+```py
+    start_indices = randint(
+        low=0,
+        high=len(dataset) - context_length,
+        size=batch_size,
+    )
+        # 每段多取一个 token，用于构造下一 token 目标。
+    indices = start_indices[:, None] + arange(context_length + 1)
+    batch = as_tensor(dataset[indices], dtype=long, device=device)
+
+    return batch[:, :-1], batch[:, 1:]
+```
+
+数据是一个特别长的一维np数组，然后我们随机采样batch_size的合法起始位置，比如采取到`[2, 10, 5]`  ，context_length为4那这个batch里的三条数据就是data里的2-6、10-14、5-9
+
+
+### 为什么要这样做
+
+这样做，是为了**从长序列中随机取出固定长度的训练片段，让模型学习预测下一个 token**。
+
+假设数据是：
+
+> 我 今天 去 公园 看见 一只 小猫 ……
+
+取出一段后，输入与目标错开一个位置：
+
+- 输入：`我 今天 去 公园`
+- 目标：`今天 去 公园 看见`
+
+模型在每个位置都学习“根据前面的内容，预测下一个 token”。因此，一条长度为 `context_length` 的输入，还需要后面额外一个 token 才能构造完整目标。
+
+你选中的代码就是在决定**每条训练片段从哪里开始**：
+
+- `size=batch_size`：选出一个批次需要的起点数量。
+- `low=0`：允许从数组开头开始。
+- `high=len(dataset) - context_length`：限制起点，确保输入及目标都不会越界。
+- 随机选择：让训练不断接触数据集中的不同片段，同时保持片段内部的 token 顺序。
+
+**随机的是片段的位置，片段内部的顺序保持不变**，模型才能学习语言中的前后关系。
+
+
+
+这样一个片段可能被多次选中，在有限次的采样中有的片段可能从来没被选中过
+
+
+
+```py
+indices = start_indices[:, None] + arange(context_length + 1)
+```
+
+`arange（）`
+
+numpy库里的一个方法
+arange(x)生成从0到x不包含x的np数组
+
+`start_indices[:, None]` 添加一个维度，把形状从 `(3,)` 变成 `(3, 1)`：
+
+```
+[[ 2],
+ [10],
+ [ 5]]
+```
+
+`arange(context_length + 1)` 生成偏移量：
+
+```
+[0, 1, 2, 3, 4]
+```
+
+相加时，NumPy 通过**广播**，让每个起点分别加上所有偏移量：
+
+```python
+indices =
+[[ 2,  3,  4,  5,  6],
+ [10, 11, 12, 13, 14],
+ [ 5,  6,  7,  8,  9]]
+```
