@@ -14,6 +14,7 @@ from cs336_basics.adamw import AdamW
 from cs336_basics.cross_entropy import cross_entropy
 from cs336_basics.embedding import Embedding
 from cs336_basics.fast_train_bpe import train_bpe
+from cs336_basics.lr_schedule import get_lr_cosine_schedule
 from cs336_basics.tokenizer import Tokenizer
 from cs336_basics.rmsnorm import RMSNorm
 from cs336_basics.rope import RotaryPositionalEmbedding
@@ -565,7 +566,7 @@ def run_get_lr_cosine_schedule(
     min_learning_rate: float,
     warmup_iters: int,
     cosine_cycle_iters: int,
-):
+) -> float:
     """
     给定余弦学习率衰减调度（包含线性预热）的参数和迭代次数，
     返回该调度在指定迭代时的学习率。
@@ -581,7 +582,13 @@ def run_get_lr_cosine_schedule(
     返回值：
         指定调度在给定迭代次数下的学习率。
     """
-    raise NotImplementedError
+    return get_lr_cosine_schedule(
+        it=it,
+        max_learning_rate=max_learning_rate,
+        min_learning_rate=min_learning_rate,
+        warmup_iters=warmup_iters,
+        cosine_cycle_iters=cosine_cycle_iters,
+    )
 
 
 def run_save_checkpoint(
