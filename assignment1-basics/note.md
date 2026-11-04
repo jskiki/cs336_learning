@@ -11,6 +11,28 @@ git commit -m "Complete Embedding implementation and test adapter"
 
 # 推送到远程仓库
 git push
+
+#如果本地和仓库都发生了修改，应执行以下操作
+1.如果本地的修改已经准备好提交
+git status
+
+# 提交本地修改，文件名按实际情况填写
+git add note.md
+git commit -m "更新学习笔记"
+
+# 获取远程更新，将本地提交接到远程最新提交之后
+git pull --rebase
+
+# 推送
+git push
+
+
+2.如果本地的修改还没完成不想提交
+git stash push -m "暂存未完成修改"
+
+git pull --ff-only
+
+git stash pop
 ```
 
 
