@@ -14,6 +14,7 @@ from cs336_basics.adamw import AdamW
 from cs336_basics.cross_entropy import cross_entropy
 from cs336_basics.embedding import Embedding
 from cs336_basics.fast_train_bpe import train_bpe
+from cs336_basics.gradient_clipping import gradient_clipping
 from cs336_basics.lr_schedule import get_lr_cosine_schedule
 from cs336_basics.tokenizer import Tokenizer
 from cs336_basics.rmsnorm import RMSNorm
@@ -550,7 +551,7 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     应原地修改这些参数的梯度（parameter.grad）。
     """
-    raise NotImplementedError
+    gradient_clipping(parameters, max_l2_norm)
 
 
 def get_adamw_cls() -> type[AdamW]:
