@@ -266,7 +266,7 @@ shifted                  (batch_size, seq_len, vocab_size)
 数据是一个特别长的一维np数组，然后我们随机采样batch_size的合法起始位置，比如采取到`[2, 10, 5]`  ，context_length为4那这个batch里的三条数据就是data里的2-6、10-14、5-9
 
 
-### 为什么要这样做
+### 为什么要这样做g
 
 这样做，是为了**从长序列中随机取出固定长度的训练片段，让模型学习预测下一个 token**。
 

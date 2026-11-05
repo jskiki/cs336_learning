@@ -25,6 +25,7 @@ from cs336_basics.softmax import softmax
 from cs336_basics.attention import MultiHeadSelfAttention, scaled_dot_product_attention
 from cs336_basics.transformer_block import TransformerBlock
 from cs336_basics.transformer_lm import TransformerLM
+from cs336_basics.checkpoint import save_checkpoint,load_checkpoint
 
 
 def run_linear(
@@ -613,7 +614,7 @@ def run_save_checkpoint(
         iteration (int): 要序列化保存的数值，表示已经完成的训练迭代次数。
         out (str | os.PathLike | BinaryIO | IO[bytes]): 保存模型、优化器和迭代次数的目标路径或类文件对象。
     """
-    raise NotImplementedError
+    return save_checkpoint(model,optimizer,iteration,out)
 
 
 def run_load_checkpoint(
@@ -632,7 +633,7 @@ def run_load_checkpoint(
     返回值：
         int: 此前序列化保存的迭代次数。
     """
-    raise NotImplementedError
+    return load_checkpoint(src,model,optimizer)
 
 
 def get_tokenizer(
