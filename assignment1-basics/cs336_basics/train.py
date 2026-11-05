@@ -1,7 +1,16 @@
 from argparse import ArgumentParser
+from pathlib import Path
 
 import torch
+import numpy as np
 
+from cs336_basics.data import get_batch
+from cs336_basics.transformer_lm import TransformerLM
+from cs336_basics.cross_entropy import cross_entropy
+from cs336_basics.adamw import AdamW
+from cs336_basics.lr_schedule import get_lr_cosine_schedule
+from cs336_basics.gradient_clipping import gradient_clipping
+from cs336_basics.checkpoint import load_checkpoint, save_checkpoint
 
 def get_hparam():
     parser = ArgumentParser(description="训练 Transformer 语言模型")
@@ -10,6 +19,7 @@ def get_hparam():
     parser.add_argument("--train_path", type=str, required=True)
     parser.add_argument("--val_path", type=str, required=True)
     parser.add_argument("--vocab_size", type=int, required=True)
+    #磁盘上的token数据用那种整数类型存储
     parser.add_argument(
         "--data_dtype",
         choices=["uint16", "uint32", "int32", "int64"],
@@ -28,6 +38,7 @@ def get_hparam():
 
     # 优化器。
     parser.add_argument("--lr", type=float, default=1e-3)
+    #metavar 就是给帮助信息中的参数值起个展示名称
     parser.add_argument(
         "--betas",
         type=float,
@@ -37,6 +48,7 @@ def get_hparam():
     )
     parser.add_argument("--adamw_eps", type=float, default=1e-8)
     parser.add_argument("--weight_decay", type=float, default=0.01)
+    #梯度裁剪的最大范数
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
 
     # 训练时长与学习率调度。
@@ -46,15 +58,21 @@ def get_hparam():
     parser.add_argument("--cosine_cycle_iters", type=int, default=None)
 
     # 日志、验证和检查点。
+    #每训练多少步记录一次日志如loss,学习率，耗时等
     parser.add_argument("--log_interval", type=int, default=10)
+    #每训练多少步在验证集上观察模型表现
     parser.add_argument("--eval_interval", type=int, default=100)
+    #每次验证使用多少个batch，通常将这些batch的loss取平均
     parser.add_argument("--eval_batches", type=int, default=10)
+    #每训练多少步保存一次检查点
     parser.add_argument("--save_interval", type=int, default=500)
+    #保存检查点的目标路径
     parser.add_argument(
         "--checkpoint_path",
         type=str,
         default="checkpoints/latest.pt",
     )
+    #启动时要加载的检查点路径；None 表示不加载已有检查点
     parser.add_argument("--resume_path", type=str, default=None)
 
     # 运行配置。
@@ -66,6 +84,7 @@ def get_hparam():
     )
     parser.add_argument("--seed", type=int, default=42)
 
+    #把参数保存到args，通过args.batch_size就能访问
     args = parser.parse_args()
 
     # 统一默认值与命令行输入产生的数据类型。
@@ -94,6 +113,7 @@ def get_hparam():
         "eval_batches",
         "save_interval",
     ):
+        #getattr()是python的内置函数，根据字符串形式的属性名获取对象的属性值
         if getattr(args, name) <= 0:
             parser.error(f"--{name} 必须大于 0")
 
@@ -114,3 +134,143 @@ def get_hparam():
 
     return args
 
+def train():
+    args = get_hparam()
+
+    # 在模型初始化和数据采样之前设置随机种子。
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+
+    train_dataset = np.memmap(
+        args.train_path,
+        dtype=args.data_dtype,
+        mode="r",
+    )
+
+    val_dataset = np.memmap(
+        args.val_path,
+        dtype=args.data_dtype,
+        mode="r",
+    )
+
+    model = TransformerLM(
+        vocab_size=args.vocab_size,
+        context_length=args.context_length,
+        d_model=args.d_model,
+        num_layers=args.num_layers,
+        num_heads=args.num_heads,
+        d_ff=args.d_ff,
+        rope_theta=args.rope_theta,
+        eps=args.eps,
+        device=args.device,
+        dtype=args.dtype,
+    )
+
+    # 整个训练过程复用同一个优化器，保留矩估计等历史状态。
+    optimizer = AdamW(
+        params=model.parameters(),
+        lr=args.lr,
+        betas=args.betas,
+        eps=args.adamw_eps,
+        weight_decay=args.weight_decay,
+    )
+
+    # iteration 表示已经完成的训练步数。如果指定了恢复的路径，就恢复，并把已经完成的步数赋值给start_iteration,否则就赋值为0从头开始计算
+    start_iteration = (
+        load_checkpoint(args.resume_path, model, optimizer)
+        if args.resume_path is not None
+        else 0
+    )
+    #确保保存检查点的目录存在没有就创建
+    Path(args.checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+    #切换到训练模式
+    model.train()
+    for iteration in range(start_iteration, args.max_iters):
+        inputs, targets = get_batch(
+            dataset=train_dataset,
+            batch_size=args.batch_size,
+            context_length=args.context_length,
+            device=args.device,
+        )
+
+        lr = get_lr_cosine_schedule(
+            it=iteration,
+            max_learning_rate=args.lr,
+            min_learning_rate=args.min_lr,
+            warmup_iters=args.warmup_iters,
+            cosine_cycle_iters=args.cosine_cycle_iters,
+        )
+        for group in optimizer.param_groups:
+            group["lr"] = lr
+
+        optimizer.zero_grad()
+
+        logits = model(inputs)
+        loss = cross_entropy(inputs=logits, targets=targets)
+        loss.backward()
+
+        gradient_clipping(
+            parameters=model.parameters(),
+            max_l2_norm=args.max_grad_norm,
+        )
+        optimizer.step()
+
+        completed_steps = iteration + 1
+        is_last_step = completed_steps == args.max_iters
+
+        #定期打印训练进度
+        if completed_steps % args.log_interval == 0 or is_last_step:
+            print(
+                f"step={completed_steps}/{args.max_iters} "
+                f"train_loss={loss.item():.4f} "
+                f"lr={lr:.6g}",
+                flush=True,
+            )
+
+        #定期进行评估
+        if completed_steps % args.eval_interval == 0 or is_last_step:
+            model.eval()
+            val_losses = []
+
+            #关闭梯度记录，不构建反向传播计算图，可以减少内存和计算开销
+            with torch.no_grad():
+                for _ in range(args.eval_batches):
+                    val_inputs, val_targets = get_batch(
+                        dataset=val_dataset,
+                        batch_size=args.batch_size,
+                        context_length=args.context_length,
+                        device=args.device,
+                    )
+                    val_logits = model(val_inputs)
+                    val_losses.append(
+                        cross_entropy(
+                            inputs=val_logits,
+                            targets=val_targets,
+                        )
+                    )
+
+            val_loss = torch.stack(val_losses).mean().item()
+            model.train()
+
+            print(
+                f"step={completed_steps} val_loss={val_loss:.4f}",
+                flush=True,
+            )
+
+        #定期保存检查点
+        if completed_steps % args.save_interval == 0 or is_last_step:
+            save_checkpoint(
+                model=model,
+                optimizer=optimizer,
+                iteration=completed_steps,
+                out=args.checkpoint_path,
+            )
+            print(
+                f"checkpoint saved: {args.checkpoint_path} "
+                f"(step={completed_steps})",
+                flush=True,
+            )
+
+
+if __name__ == "__main__":
+    train()
