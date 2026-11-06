@@ -173,15 +173,15 @@ def train_bpe(
 if __name__ == "__main__":
     import pickle
 
-    print("开始训练 OpenWebText BPE……", flush=True)
+    print("开始训练 TinyStories BPE……", flush=True)
 
     vocab, merges = train_bpe(
-        input_path="data/owt_train.txt",
-        vocab_size=32000,
+        input_path="data/TinyStoriesV2-GPT4-train.txt",
+        vocab_size=10000,
         special_tokens=["<|endoftext|>"],
     )
 
-    with open("data/owt_bpe.pkl", "wb") as f:
+    with open("data/tinystories_bpe.pkl", "wb") as f:
         pickle.dump({"vocab": vocab, "merges": merges}, f)
 
     print(f"训练完成：词表 {len(vocab)} 项，合并 {len(merges)} 次")

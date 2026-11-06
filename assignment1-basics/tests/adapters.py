@@ -17,6 +17,7 @@ from cs336_basics.embedding import Embedding
 from cs336_basics.fast_train_bpe import train_bpe
 from cs336_basics.gradient_clipping import gradient_clipping
 from cs336_basics.lr_schedule import get_lr_cosine_schedule
+from cs336_basics.linear import Linear
 from cs336_basics.tokenizer import Tokenizer
 from cs336_basics.rmsnorm import RMSNorm
 from cs336_basics.rope import RotaryPositionalEmbedding
@@ -47,13 +48,14 @@ def run_linear(
         Float[Tensor, "... d_out"]: 线性模块变换后的输出。
     """
 
-    # TODO 1：从 cs336_basics.linear 导入你完成的 Linear 类。
-    # TODO 2：根据 d_in、d_out 构造模块；设备和数据类型应与 weights 一致。
-    # TODO 3：将给定 weights 加载到模块的 weight 参数中。
-    #         可以使用 load_state_dict，注意状态字典的键与参数名称一致。
-    #         测试应使用传入的权重，而不是模块随机初始化得到的权重。
-    # TODO 4：将 in_features 交给模块计算，并返回输出张量。
-    raise NotImplementedError
+    linear = Linear(
+        in_features=d_in,
+        out_features=d_out,
+        device=weights.device,
+        dtype=weights.dtype,
+    )
+    linear.load_state_dict({"weight": weights})
+    return linear(in_features)
 
 
 def run_embedding(
