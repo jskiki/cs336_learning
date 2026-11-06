@@ -1,5 +1,7 @@
 from argparse import ArgumentParser
 from pathlib import Path
+import json
+import time
 
 import torch
 import numpy as np
@@ -183,93 +185,120 @@ def train():
     )
     #确保保存检查点的目录存在没有就创建
     Path(args.checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+
+    #把参数转换成字典并复制一份
+    config = vars(args).copy()
+    # torch.dtype 不能直接写入 JSON，转换为与命令行参数一致的字符串。torch.float32->"torch.float32"->"float32"
+    config["dtype"] = str(args.dtype).removeprefix("torch.")
+    with (Path(args.checkpoint_path).parent / "config.json").open("w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
     #切换到训练模式
     model.train()
-    for iteration in range(start_iteration, args.max_iters):
-        inputs, targets = get_batch(
-            dataset=train_dataset,
-            batch_size=args.batch_size,
-            context_length=args.context_length,
-            device=args.device,
-        )
-
-        lr = get_lr_cosine_schedule(
-            it=iteration,
-            max_learning_rate=args.lr,
-            min_learning_rate=args.min_lr,
-            warmup_iters=args.warmup_iters,
-            cosine_cycle_iters=args.cosine_cycle_iters,
-        )
-        for group in optimizer.param_groups:
-            group["lr"] = lr
-
-        optimizer.zero_grad()
-
-        logits = model(inputs)
-        loss = cross_entropy(inputs=logits, targets=targets)
-        loss.backward()
-
-        gradient_clipping(
-            parameters=model.parameters(),
-            max_l2_norm=args.max_grad_norm,
-        )
-        optimizer.step()
-
-        completed_steps = iteration + 1
-        is_last_step = completed_steps == args.max_iters
-
-        #定期打印训练进度
-        if completed_steps % args.log_interval == 0 or is_last_step:
-            print(
-                f"step={completed_steps}/{args.max_iters} "
-                f"train_loss={loss.item():.4f} "
-                f"lr={lr:.6g}",
-                flush=True,
+    start_time = time.perf_counter()
+    # 每次启动重新记录；不同实验使用不同的检查点目录。
+    with (Path(args.checkpoint_path).parent / "metrics.jsonl").open("w", encoding="utf-8") as metrics_file:
+        for iteration in range(start_iteration, args.max_iters):
+            inputs, targets = get_batch(
+                dataset=train_dataset,
+                batch_size=args.batch_size,
+                context_length=args.context_length,
+                device=args.device,
             )
 
-        #定期进行评估
-        if completed_steps % args.eval_interval == 0 or is_last_step:
-            model.eval()
-            val_losses = []
+            lr = get_lr_cosine_schedule(
+                it=iteration,
+                max_learning_rate=args.lr,
+                min_learning_rate=args.min_lr,
+                warmup_iters=args.warmup_iters,
+                cosine_cycle_iters=args.cosine_cycle_iters,
+            )
+            for group in optimizer.param_groups:
+                group["lr"] = lr
 
-            #关闭梯度记录，不构建反向传播计算图，可以减少内存和计算开销
-            with torch.no_grad():
-                for _ in range(args.eval_batches):
-                    val_inputs, val_targets = get_batch(
-                        dataset=val_dataset,
-                        batch_size=args.batch_size,
-                        context_length=args.context_length,
-                        device=args.device,
-                    )
-                    val_logits = model(val_inputs)
-                    val_losses.append(
-                        cross_entropy(
-                            inputs=val_logits,
-                            targets=val_targets,
+            optimizer.zero_grad()
+
+            logits = model(inputs)
+            loss = cross_entropy(inputs=logits, targets=targets)
+            loss.backward()
+
+            gradient_clipping(
+                parameters=model.parameters(),
+                max_l2_norm=args.max_grad_norm,
+            )
+            optimizer.step()
+
+            completed_steps = iteration + 1
+            is_last_step = completed_steps == args.max_iters
+
+            #定期打印并保存训练进度
+            if completed_steps % args.log_interval == 0 or is_last_step:
+                train_loss = loss.item()
+                record = {
+                    "step": completed_steps,
+                    "elapsed_seconds": time.perf_counter() - start_time,
+                    "train_loss": train_loss,
+                    "lr": lr,
+                }
+                metrics_file.write(json.dumps(record) + "\n")
+                metrics_file.flush()
+                print(
+                    f"step={completed_steps}/{args.max_iters} "
+                    f"train_loss={train_loss:.4f} "
+                    f"lr={lr:.6g}",
+                    flush=True,
+                )
+
+            #定期进行评估
+            if completed_steps % args.eval_interval == 0 or is_last_step:
+                model.eval()
+                val_losses = []
+
+                #关闭梯度记录，不构建反向传播计算图，可以减少内存和计算开销
+                with torch.no_grad():
+                    for _ in range(args.eval_batches):
+                        val_inputs, val_targets = get_batch(
+                            dataset=val_dataset,
+                            batch_size=args.batch_size,
+                            context_length=args.context_length,
+                            device=args.device,
                         )
-                    )
+                        val_logits = model(val_inputs)
+                        val_losses.append(
+                            cross_entropy(
+                                inputs=val_logits,
+                                targets=val_targets,
+                            )
+                        )
 
-            val_loss = torch.stack(val_losses).mean().item()
-            model.train()
+                val_loss = torch.stack(val_losses).mean().item()
+                model.train()
 
-            print(
-                f"step={completed_steps} val_loss={val_loss:.4f}",
-                flush=True,
-            )
+                record = {
+                    "step": completed_steps,
+                    "elapsed_seconds": time.perf_counter() - start_time,
+                    "val_loss": val_loss,
+                }
+                metrics_file.write(json.dumps(record) + "\n")
+                metrics_file.flush()
+                print(
+                    f"step={completed_steps} val_loss={val_loss:.4f}",
+                    flush=True,
+                )
 
-        #定期保存检查点
-        if completed_steps % args.save_interval == 0 or is_last_step:
-            save_checkpoint(
-                model=model,
-                optimizer=optimizer,
-                iteration=completed_steps,
-                out=args.checkpoint_path,
-            )
-            print(
-                f"checkpoint saved: {args.checkpoint_path} "
-                f"(step={completed_steps})",
-                flush=True,
-            )
+            #定期保存检查点
+            if completed_steps % args.save_interval == 0 or is_last_step:
+                save_checkpoint(
+                    model=model,
+                    optimizer=optimizer,
+                    iteration=completed_steps,
+                    out=args.checkpoint_path,
+                )
+                print(
+                    f"checkpoint saved: {args.checkpoint_path} "
+                    f"(step={completed_steps})",
+                    flush=True,
+                )
 
 
 if __name__ == "__main__":
