@@ -136,6 +136,26 @@ def get_hparam():
 
     return args
 
+
+def train_step(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    inputs: torch.Tensor,
+    targets: torch.Tensor,
+    max_grad_norm: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """执行一次参数更新，返回本次更新前的 loss 和 logits。"""
+    optimizer.zero_grad()
+    logits = model(inputs)
+    loss = cross_entropy(inputs=logits, targets=targets)
+    loss.backward()
+    gradient_clipping(parameters=model.parameters(), max_l2_norm=max_grad_norm)
+    optimizer.step()
+
+    # 调用方只用结果记录指标，detach 避免日志持有计算图；梯度保留供调试检查。
+    return loss.detach(), logits.detach()
+
+
 def train():
     args = get_hparam()
 
@@ -216,17 +236,13 @@ def train():
             for group in optimizer.param_groups:
                 group["lr"] = lr
 
-            optimizer.zero_grad()
-
-            logits = model(inputs)
-            loss = cross_entropy(inputs=logits, targets=targets)
-            loss.backward()
-
-            gradient_clipping(
-                parameters=model.parameters(),
-                max_l2_norm=args.max_grad_norm,
+            loss, _ = train_step(
+                model=model,
+                optimizer=optimizer,
+                inputs=inputs,
+                targets=targets,
+                max_grad_norm=args.max_grad_norm,
             )
-            optimizer.step()
 
             completed_steps = iteration + 1
             is_last_step = completed_steps == args.max_iters
