@@ -330,6 +330,7 @@ indices =
 
 
 
+<<<<<<< Updated upstream
 ### torch.compile
 
 默认情况下，PyTorch 通常按照程序的执行顺序，逐个调度张量运算。这叫 **eager execution，即时执行**。
@@ -424,3 +425,205 @@ future = pool.submit(encode_chunk, input_path, start, end)
 | `future.done()`   | 查询任务是否已经结束，立即返回布尔值 |
 | `future.result()` | 获取结果；尚未结束就等待             |
 | `future.cancel()` | 尝试取消尚未开始的任务               |
+=======
+## Json操作
+
+| 函数           | 作用                             | 输入 → 输出                 |
+| -------------- | -------------------------------- | --------------------------- |
+| `json.dumps()` | 把 Python 对象转换成 JSON 字符串 | Python 对象 → `str`         |
+| `json.loads()` | 把 JSON 内容解析成 Python 对象   | JSON 字符串等 → Python 对象 |
+| `json.dump()`  | 把 Python 对象写入 JSON 文件     | Python 对象 → 文件          |
+| `json.load()`  | 从 JSON 文件读取 Python 对象     | 文件 → Python 对象          |
+
+### example1
+
+**使用 `json.dumps()`，把 Python 对象转成 JSON 字符串。**
+
+```python
+import json
+
+user = {
+    "name": "小明",
+    "age": 20,
+    "is_student": True,
+    "address": None,
+}
+
+text = json.dumps(user, ensure_ascii=False)
+
+print(text)
+print(type(text))
+```
+
+输出：
+
+```python
+{"name": "小明", "age": 20, "is_student": true, "address": null}
+<class 'str'>
+```
+
+转换之后，`text` 是字符串，已经不是字典了
+
+`dumps()` 常用参数如下：
+
+| 参数                    | 作用                                              |
+| ----------------------- | ------------------------------------------------- |
+| `ensure_ascii=False`    | 让中文等非 ASCII 字符直接显示                     |
+| `indent=2`              | 使用 2 个空格缩进，方便阅读                       |
+| `sort_keys=True`        | 按键排序                                          |
+| `separators=(",", ":")` | 去掉分隔符旁多余的空格                            |
+| `allow_nan=False`       | 遇到 `NaN`、正负无穷大时报错，避免输出非标准 JSON |
+| `default=函数`          | 指定不支持的对象如何转换                          |
+
+### example2
+
+**使用 `json.loads()`，把 JSON 字符串转成 Python 对象。**
+
+```python
+import json
+
+text = """
+{
+  "name": "小明",
+  "age": 20,
+  "skills": ["Python", "SQL"],
+  "is_student": true
+}
+"""
+
+user = json.loads(text)
+
+print(type(user))          # <class 'dict'>
+print(user["name"])        # 小明
+print(user["skills"][0])   # Python
+print(user["is_student"])  # True
+```
+
+解析完成后，就可以正常使用字典、列表等 Python 操作：
+
+```python
+user["age"] += 1
+user["skills"].append("Git")
+
+print(user["age"])     # 21
+print(user["skills"])  # ['Python', 'SQL', 'Git']
+```
+
+读取可能不存在的键，可以使用 `get()`：
+
+```python
+city = user.get("city", "未知")
+print(city)  # 未知
+```
+
+`loads()` 接收 `str`，也支持包含 JSON 数据的 `bytes` 和 `bytearray`。它不接收一个已经解析好的字典：
+
+```python
+data = {"name": "小明"}
+
+# 错误：data 已经是字典，无需再次解析
+# json.loads(data)
+```
+
+### example3
+
+ **使用 `json.dump()`，将数据写入 JSON 文件。**
+
+```python
+import json
+
+users = [
+    {"name": "小明", "age": 20},
+    {"name": "小红", "age": 22},
+]
+
+with open("users.json", "w", encoding="utf-8") as file:
+    json.dump(
+        users,
+        file,
+        ensure_ascii=False,
+        indent=2,
+    )
+```
+
+生成的 `users.json` 内容是：
+
+```python
+[
+  {
+    "name": "小明",
+    "age": 20
+  },
+  {
+    "name": "小红",
+    "age": 22
+  }
+]
+```
+
+这里有几个关键点：
+
+- `"w"` 表示写入模式；文件不存在时创建，存在时会清空原内容。
+- `encoding="utf-8"` 指定文件编码。
+- `with` 会在代码块结束后关闭文件。
+- `ensure_ascii=False` 控制 JSON 文本的字符表示方式，**并不负责设置文件编码**。
+
+`dump()` 负责写入文件，返回值是 `None`。需要获得字符串时，应使用 `dumps()`。
+
+### example4
+
+**使用 `json.load()`，读取 JSON 文件。**
+
+```py
+import json
+
+with open("users.json", "r", encoding="utf-8") as file:
+    users = json.load(file)
+
+print(type(users))       # <class 'list'>
+print(users[0]["name"])  # 小明
+```
+
+返回什么 Python 类型，取决于文件里的 JSON 顶层是什么：
+
+```python
+{"name": "小明"}
+```
+
+读取后是 `dict`。
+
+```python
+[{"name": "小明"}, {"name": "小红"}]
+```
+
+读取后是 `list`。
+
+可以把这两组操作放在一起理解：
+
+```python
+# 字符串
+text = json.dumps(data)
+data = json.loads(text)
+
+# 文件
+json.dump(data, file)
+data = json.load(file)
+```
+
+
+
+
+
+### with open() as
+
+```
+with open("data.json", "r", encoding="utf-8") as input_file:
+```
+
+| 模式  | 含义             | 文件不存在时 | 文件已存在时           |
+| ----- | ---------------- | ------------ | ---------------------- |
+| `"r"` | 只读，默认模式   | 报错         | 读取内容，不修改       |
+| `"w"` | 只写             | 创建文件     | **先清空原内容**       |
+| `"a"` | 追加写入         | 创建文件     | 在末尾追加，保留原内容 |
+| `"x"` | 创建新文件并写入 | 创建文件     | 报错，避免覆盖         |
+>>>>>>> Stashed changes
