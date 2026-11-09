@@ -654,3 +654,36 @@ result.check_returncode()
 如果改成 check=True，训练失败时会在第一行直接抛出异常，后面的 volume.commit() 就执行不到了。
 
 check=False 不会让训练忽略错误继续训练，它只是推迟在父进程中报告失败的时机。
+
+# Moadl使用方法
+
+### uv给项目添加Python包
+
+uv add --dev modal
+
+### 登陆
+
+uv run modal setup
+需要代理，直接问AI，让他查代理端口并给出设置的命令
+
+### 创建持久化存储Volume
+
+uv run modal volume create cs336-data --version=2
+
+部分含义`uv run`在当前项目的 Python 环境中运行后面的命令`modal`调用 Modal 命令行工具`volume`操作 Modal 的持久化存储`create`创建一个新的 Volume`cs336-data`你给这个 Volume 起的名字，可以自行命名`--version=2`使用 Volume 文件系统的 **v2 版本**，不是创建两个 Volume
+
+### 上传数据
+
+uv run modal volume put cs336-data \
+  data/tinystories_train.bin /tinystories_train.bin
+
+uv run modal volume put cs336-data \
+  data/tinystories_valid.bin /tinystories_valid.bin
+
+cs336-data：刚创建的 Volume。
+data/...：本地文件路径。
+/...：文件在 Volume 内部的保存路径。
+
+### 查看
+
+uv run modal volume ls cs336-data
