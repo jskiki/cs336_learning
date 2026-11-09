@@ -330,7 +330,6 @@ indices =
 
 
 
-<<<<<<< Updated upstream
 ### torch.compile
 
 默认情况下，PyTorch 通常按照程序的执行顺序，逐个调度张量运算。这叫 **eager execution，即时执行**。
@@ -425,7 +424,6 @@ future = pool.submit(encode_chunk, input_path, start, end)
 | `future.done()`   | 查询任务是否已经结束，立即返回布尔值 |
 | `future.result()` | 获取结果；尚未结束就等待             |
 | `future.cancel()` | 尝试取消尚未开始的任务               |
-=======
 ## Json操作
 
 | 函数           | 作用                             | 输入 → 输出                 |
@@ -626,4 +624,33 @@ with open("data.json", "r", encoding="utf-8") as input_file:
 | `"w"` | 只写             | 创建文件     | **先清空原内容**       |
 | `"a"` | 追加写入         | 创建文件     | 在末尾追加，保留原内容 |
 | `"x"` | 创建新文件并写入 | 创建文件     | 报错，避免覆盖         |
->>>>>>> Stashed changes
+
+
+main() 解析参数
+  ├─ --gpu B200：用于选择云端 GPU
+  └─ --batch_size 32：放入 trainer_arguments
+          ↓
+run_training(trainer_arguments, run_name)
+          ↓
+training_command(arguments, run_dir)
+          ↓
+subprocess.run() 启动 train.py
+          ↓
+train.py 解析最终参数
+
+check=False 决定的是：训练程序失败退出后，subprocess.run() 是否立刻抛出异常。
+
+程序退出时会返回一个数字，叫“退出码”：
+- 0：通常表示成功。
+- 非 0：通常表示失败，例如训练因显存不足而退出。
+代码是：
+result = subprocess.run(..., check=False)
+volume.commit()
+result.check_returncode()
+执行顺序是：
+1. 等待训练程序结束；即使训练失败，也先返回 result，继续往下执行。
+2. volume.commit() 保存已经生成的日志和检查点。
+3. result.check_returncode() 检查退出码；非 0 时再抛出异常，报告失败。
+如果改成 check=True，训练失败时会在第一行直接抛出异常，后面的 volume.commit() 就执行不到了。
+
+check=False 不会让训练忽略错误继续训练，它只是推迟在父进程中报告失败的时机。
