@@ -58,6 +58,7 @@ def training_command(arguments: list[str], run_dir: str) -> list[str]:
     ]
 
 #将后面的函数注册为云端函数，image：使用前面描述的容器环境，volumes={"/data": volume}：将cs336-data卷挂载到容器的/data目录，timeout：云端函数执行超时时间单位为秒
+#装饰器返回一个Modal的Function对象，并把它绑定到run_training
 @app.function(image=image, gpu="B200", volumes={"/data": volume}, timeout=24 * 60 * 60)
 def run_training(arguments: list[str], run_name: str) -> dict:#run_name本次训练的名称
     import json
@@ -112,12 +113,14 @@ def main(*arguments):
     parser.add_argument("--gpu", default="B200", help="Modal 显卡类型，默认为 B200")
     parser.add_argument("--run-name", default="", help="cs336-data/runs 下的新目录名；目录不能已存在，省略时自动生成")
 
-    #把参数拆成两部分args：这个启动脚本认识的参数，例如 --gpu`、--run-name
+    #把参数拆成两部分args：这个启动脚本认识的参数，例如 --gpu`、--run-name，agrs是解析后的对象，tariner_arguments是不认识的字符串数组
     args, trainer_arguments = parser.parse_known_args(arguments)
     if args.run_name and (args.run_name in (".", "..") or "/" in args.run_name or "\\" in args.run_name):
         parser.error("--run-name 必须是单个目录名，不能为 .、.. 或包含路径分隔符")
+    #生成本次训练的名称，如果没有传入就自动生成一个为：train- + 日期 + uuid4生成的十六进制字符的前8个字
     run_name = args.run_name or f"train-{datetime.now(UTC):%Y%m%d-%H%M%S}-{uuid4().hex[:8]}"
     print(f"正在提交训练，显卡：{args.gpu}；结果保存至：cs336-data/runs/{run_name}", flush=True)
+    #with_options(gpu=args.gpu)：为这次调用指定 GPU 配置,.spawn提交后返回modal.FunctionCall 对象，赋给 call，此时不必等训练结束。call 是这次任务的引用，训练结果之后再获取
     call = run_training.with_options(gpu=args.gpu).spawn(trainer_arguments, run_name)
     print(f"云端调用编号：{call.object_id}", flush=True)
     print(json.dumps(call.get(), indent=2))
