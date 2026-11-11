@@ -131,7 +131,7 @@ def generate(
     #numel():返回张量中的元素总数
     length = prompt_ids.numel()
     #new_empty根据现有张量的dtype和device创建一个指定形状的新张量，但不初始化元素值
-    output = prompt_ids.new_empty((length+max_new_tokens))
+    output = prompt_ids.new_empty(length+max_new_tokens)
     output[:length].copy_(prompt_ids)
     # TODO 7：完成自回归生成，并处理上下文长度与停止条件。
     #保存下模型状态，后面要转成eval模式，was_training是布尔值
