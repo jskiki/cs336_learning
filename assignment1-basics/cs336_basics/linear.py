@@ -59,7 +59,7 @@ class Linear(nn.Module):
         )
 
         std = math.sqrt(2.0/(in_features + out_features))
-        #函数名末尾的_表示原地修改，直接填写已有的self.weight
+        #函数名末尾的_表示原地修改，直接填写已有的self.weight，截断正态初始化
         nn.init.trunc_normal_(
             self.weight,
             mean = 0.0,

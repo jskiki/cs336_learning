@@ -44,6 +44,8 @@ def training_command(arguments: list[str], run_dir: str) -> list[str]:
         "warmup_iters": 2,
         "eval_batches": 2,
     }
+    #上面的defaluts也会被加入下面的参数构造，如果没有传argusments就会使用defaults，
+    #二者一起传入cs336_basics.train.py,argparse 对当前这种普通单值参数，保留最后一次出现的值,所以arguments在后
     return [
         "-u",
         "-m",
