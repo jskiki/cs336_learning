@@ -37,7 +37,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=Path, help="可选：把配置和逐步耗时保存为 JSON")
+    parser.add_argument("--timing-breakdown", action="store_true", help="反向或训练模式：在各阶段之间同步，单独测量阶段耗时")
     args = parser.parse_args()
+
+    if args.steps <= 0 or args.warmup_steps < 0:
+        parser.error("steps 必须为正数，warmup-steps 不能为负数")
+    if args.timing_breakdown and args.mode == "forward":
+        parser.error("--timing-breakdown 用于 forward_backward 或 train 模式")
 
     return args
 
@@ -59,19 +65,20 @@ def run_step(
         # 放在计时范围内；每一步独立计算梯度，不跨步骤累积。
         model.zero_grad(set_to_none=True)
 
-    #前向传播
+    # 前向传播
     logits = model(inputs)
 
     if mode == "forward":
         return
 
-    #计算损失，反向传播
+    # 计算损失，反向传播
     loss = cross_entropy(inputs=logits, targets=targets)
     loss.backward()
     if mode == "train" and optimizer is not None:
         optimizer.step()
 
-#等待GPU完成工作
+
+# 等待GPU完成工作
 def synchronize(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -122,7 +129,11 @@ def benchmark(args: argparse.Namespace) -> dict:
 
     # 保证 forward 模式也记录训练所需的计算图。
     with torch.enable_grad():
-        timings = measure_steps(step, device, args.warmup_steps, args.steps)
+        if args.timing_breakdown:
+            timings, phase_timings = measure_training_phases(model, optimizer, inputs, targets, device, args.warmup_steps, args.steps)
+        else:
+            timings = measure_steps(step, device, args.warmup_steps, args.steps)
+            phase_timings = {}
 
     config = {key: value for key, value in vars(args).items() if key != "output"}
     return {
@@ -130,12 +141,70 @@ def benchmark(args: argparse.Namespace) -> dict:
         "model_class": f"{type(model).__module__}.{type(model).__name__}",
         "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu",
         "torch_version": str(torch.__version__),
+        "torch_cpu_threads": torch.get_num_threads(),
+        "cuda_runtime_version": torch.version.cuda,
         "parameter_count": sum(p.numel() for p in model.parameters()),
         "step_times_seconds": timings,
         "mean_seconds": statistics.mean(timings),
         "std_seconds": statistics.stdev(timings) if len(timings) > 1 else 0.0,
         "std_convention": "sample (n-1); 0 for a single measurement",
+        "timing_scope": "synchronized_phases" if args.timing_breakdown else "end_to_end",
+        "phase_timings_seconds": phase_timings,
+        "phase_statistics": {
+            name: {
+                "mean_seconds": statistics.mean(samples),
+                "std_seconds": statistics.stdev(samples) if len(samples) > 1 else 0.0,
+            }
+            for name, samples in phase_timings.items()
+        },
+        "cuda_memory_total_bytes": torch.cuda.get_device_properties(device).total_memory if device.type == "cuda" else None,
+        "cuda_peak_allocated_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None,
+        "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
     }
+
+
+def measure_training_phases(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer | None,
+    inputs: torch.Tensor,
+    targets: torch.Tensor,
+    device: torch.device,
+    warmup_steps: int,
+    steps: int,
+) -> tuple[list[float], dict[str, list[float]]]:
+    """独立诊断实验：每个阶段结束后同步，不替代原有端到端测量。"""
+    names = ("zero_grad", "forward", "loss", "backward") + (("optimizer",) if optimizer is not None else ())
+    phase_timings = {name: [] for name in names}
+    totals = []
+    synchronize(device)
+
+    def step() -> tuple[float, dict[str, float]]:
+        samples = {}
+
+        def phase(name: str, operation: Callable):
+            start = default_timer()
+            value = operation()
+            synchronize(device)
+            samples[name] = default_timer() - start
+            return value
+
+        start = default_timer()
+        phase("zero_grad", lambda: model.zero_grad(set_to_none=True))
+        logits = phase("forward", lambda: model(inputs))
+        loss = phase("loss", lambda: cross_entropy(inputs=logits, targets=targets))
+        phase("backward", loss.backward)
+        if optimizer is not None:
+            phase("optimizer", optimizer.step)
+        return default_timer() - start, samples
+
+    for _ in range(warmup_steps):
+        step()
+    for _ in range(steps):
+        elapsed, samples = step()
+        totals.append(elapsed)
+        for name, value in samples.items():
+            phase_timings[name].append(value)
+    return totals, phase_timings
 
 
 def main() -> None:
