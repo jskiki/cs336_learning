@@ -187,6 +187,9 @@ def train():
         device=args.device,
         dtype=args.dtype,
     )
+    # 在云端 CUDA 训练时启用编译。
+    if torch.device(args.device).type == "cuda":
+        model.compile(backend="inductor")
 
     # 整个训练过程复用同一个优化器，保留矩估计等历史状态。
     optimizer = AdamW(

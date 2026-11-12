@@ -1,0 +1,38 @@
+{
+  "config": {
+    "mode": "train",
+    "vocab_size": 32,
+    "batch_size": 2,
+    "context_length": 8,
+    "d_model": 16,
+    "d_ff": 32,
+    "num_layers": 1,
+    "num_heads": 4,
+    "rope_theta": 10000.0,
+    "warmup_steps": 5,
+    "steps": 10,
+    "device": "cpu",
+    "dtype": "float32",
+    "lr": 0.001,
+    "seed": 42
+  },
+  "model_class": "cs336_basics.transformer_lm.TransformerLM",
+  "device_name": "cpu",
+  "torch_version": "2.11.0",
+  "parameter_count": 3632,
+  "step_times_seconds": [
+    0.0010836250148713589,
+    0.0010654999932739884,
+    0.0010304590105079114,
+    0.0010306249896530062,
+    0.0010225830192212015,
+    0.0010188749874942005,
+    0.0010207500017713755,
+    0.0013188339944463223,
+    0.001297540991799906,
+    0.001073999999789521
+  ],
+  "mean_seconds": 0.0010962792002828792,
+  "std_seconds": 0.00011421751555726636,
+  "std_convention": "sample (n-1); 0 for a single measurement"
+}
