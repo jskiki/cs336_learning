@@ -1,6 +1,7 @@
 """作业 2.1.3(a)：使用我们自己的 Transformer 做端到端基准测试。
 
 运行方式：uv run python -m cs336_systems.benchmark --mode train
+BF16 混合精度：加 --mixed-precision，模型参数仍使用默认的 float32。
 仅前向模式也保留自动求导记录，测量的是训练前向，而不是推理。
 """
 
@@ -36,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--device", default="cuda", help="cuda、cuda:0 或 cpu；CPU 用于本地检查")
     parser.add_argument("--dtype", choices=("float32", "float16", "bfloat16"), default="float32")
+    parser.add_argument("--mixed-precision", action="store_true", help="使用 BF16 autocast 执行前向与损失计算，模型参数保持 FP32")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=Path, help="可选：把配置和逐步耗时保存为 JSON")
@@ -46,6 +48,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("steps 必须为正数，warmup-steps 不能为负数")
     if args.timing_breakdown and args.mode == "forward":
         parser.error("--timing-breakdown 用于 forward_backward 或 train 模式")
+    if args.mixed_precision and args.dtype != "float32":
+        parser.error("--mixed-precision 要求 --dtype float32，BF16 由 autocast 控制")
+    if args.mixed_precision and args.timing_breakdown:
+        parser.error("--mixed-precision 暂不支持 --timing-breakdown，请使用普通计时路径")
 
     return args
 
@@ -61,6 +67,8 @@ def run_step(
     targets: torch.Tensor,
     mode: str,
     optimizer: torch.optim.Optimizer | None = None,
+    *,
+    mixed_precision: bool = False,
 ) -> None:
     """三种模式计时的范围不同，初始化和随机数据生成由外部负责。"""
     if mode not in ("forward", "forward_backward", "train"):
@@ -72,16 +80,19 @@ def run_step(
         # 放在计时范围内；每一步独立计算梯度，不跨步骤累积。
         model.zero_grad(set_to_none=True)
 
-    # 前向传播
-    with _nvtx_range("forward", inputs.device):
-        logits = model(inputs)
+    # 每一步分别进入 autocast，原始参数不变；关闭时沿用原有精度。
+    with torch.autocast(device_type=inputs.device.type, dtype=torch.bfloat16) if mixed_precision else nullcontext():
+        # 前向传播
+        with _nvtx_range("forward", inputs.device):
+            logits = model(inputs)
 
-    if mode == "forward":
-        return
+        if mode == "forward":
+            return
 
-    # 计算损失，反向传播
-    with _nvtx_range("loss", inputs.device):
-        loss = cross_entropy(inputs=logits, targets=targets)
+        with _nvtx_range("loss", inputs.device):
+            loss = cross_entropy(inputs=logits, targets=targets)
+
+    # 反向与优化器更新在 autocast 区间外执行。
     with _nvtx_range("backward", inputs.device):
         loss.backward()
     if mode == "train" and optimizer is not None:
@@ -139,7 +150,7 @@ def benchmark(args: argparse.Namespace) -> dict:
     targets = tokens[:, 1:].contiguous()
 
     def step() -> None:
-        run_step(model, inputs, targets, args.mode, optimizer)
+        run_step(model, inputs, targets, args.mode, optimizer, mixed_precision=args.mixed_precision)
 
     # 保证 forward 模式也记录训练所需的计算图。
     with torch.enable_grad():
@@ -152,6 +163,7 @@ def benchmark(args: argparse.Namespace) -> dict:
     config = {key: value for key, value in vars(args).items() if key != "output"}
     return {
         "config": config,
+        "autocast_dtype": "bfloat16" if args.mixed_precision else None,
         "model_class": f"{type(model).__module__}.{type(model).__name__}",
         "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu",
         "torch_version": str(torch.__version__),
@@ -225,7 +237,7 @@ def main() -> None:
     args = parse_args()
     result = benchmark(args)
     print(f"model={result['model_class']} parameters={result['parameter_count']:,}")
-    print(f"device={result['device_name']} dtype={args.dtype} mode={args.mode}")
+    print(f"device={result['device_name']} dtype={args.dtype} autocast={result['autocast_dtype']} mode={args.mode}")
     print(f"warmup_steps={args.warmup_steps} measured_steps={args.steps}")
     for index, seconds in enumerate(result["step_times_seconds"], start=1):
         print(f"step={index} elapsed_ms={seconds * 1000:.3f}")
