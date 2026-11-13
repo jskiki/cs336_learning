@@ -8,10 +8,12 @@ import argparse
 import json
 import statistics
 from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path
 from timeit import default_timer
 
 import torch
+import torch.cuda.nvtx as nvtx
 
 from cs336_basics.adamw import AdamW
 from cs336_basics.cross_entropy import cross_entropy
@@ -48,6 +50,11 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def _nvtx_range(name: str, device: torch.device):
+    """CUDA 环境记录 NVTX 标签；CPU 环境使用空上下文。"""
+    return nvtx.range(name) if device.type == "cuda" else nullcontext()
+
+
 def run_step(
     model: torch.nn.Module,
     inputs: torch.Tensor,
@@ -66,16 +73,20 @@ def run_step(
         model.zero_grad(set_to_none=True)
 
     # 前向传播
-    logits = model(inputs)
+    with _nvtx_range("forward", inputs.device):
+        logits = model(inputs)
 
     if mode == "forward":
         return
 
     # 计算损失，反向传播
-    loss = cross_entropy(inputs=logits, targets=targets)
-    loss.backward()
+    with _nvtx_range("loss", inputs.device):
+        loss = cross_entropy(inputs=logits, targets=targets)
+    with _nvtx_range("backward", inputs.device):
+        loss.backward()
     if mode == "train" and optimizer is not None:
-        optimizer.step()
+        with _nvtx_range("optimizer", inputs.device):
+            optimizer.step()
 
 
 # 等待GPU完成工作
@@ -93,11 +104,14 @@ def measure_steps(step: Callable[[], None], device: torch.device, warmup_steps: 
         synchronize(device)
 
     timings = []
-    for _ in range(steps):
-        start = default_timer()
-        step()
-        synchronize(device)
-        timings.append(default_timer() - start)
+    # 只包住正式测量，便于 nsys 按 measurement 标签排除预热。
+    # 最后一步的 GPU 同步也在区间内，保证退出区间前所有工作已完成。
+    with _nvtx_range("measurement", device):
+        for _ in range(steps):
+            start = default_timer()
+            step()
+            synchronize(device)
+            timings.append(default_timer() - start)
     return timings
 
 
