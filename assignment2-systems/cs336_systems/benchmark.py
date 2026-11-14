@@ -3,11 +3,13 @@
 运行方式：uv run python -m cs336_systems.benchmark --mode train
 BF16 混合精度：加 --mixed-precision，模型参数仍使用默认的 float32。
 仅前向模式也保留自动求导记录，测量的是训练前向，而不是推理。
+真实推理使用 --mode inference；显存快照使用 --memory-profile。
 """
 
 import argparse
 import json
 import statistics
+import warnings
 from collections.abc import Callable
 from contextlib import nullcontext
 from pathlib import Path
@@ -23,7 +25,7 @@ from cs336_basics.transformer_lm import TransformerLM
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("forward", "forward_backward", "train"), default="train")
+    parser.add_argument("--mode", choices=("inference", "forward", "forward_backward", "train"), default="train")
     parser.add_argument("--vocab-size", type=int, default=10_000)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--context-length", type=int, default=512)
@@ -41,17 +43,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=Path, help="可选：把配置和逐步耗时保存为 JSON")
+    parser.add_argument("--memory-profile", action="store_true", help="CUDA 显存分析：只记录正式测量，保存可由 memory_viz 打开的快照")
+    parser.add_argument("--memory-snapshot", type=Path, help="快照路径；默认使用 output 同名 .pickle，未指定 output 时为 memory_snapshot.pickle")
+    parser.add_argument("--memory-max-entries", type=int, default=1_000_000, help="显存历史事件的最大记录数")
     parser.add_argument("--timing-breakdown", action="store_true", help="反向或训练模式：在各阶段之间同步，单独测量阶段耗时")
     args = parser.parse_args()
 
     if args.steps <= 0 or args.warmup_steps < 0:
         parser.error("steps 必须为正数，warmup-steps 不能为负数")
-    if args.timing_breakdown and args.mode == "forward":
+    if args.timing_breakdown and args.mode in ("forward", "inference"):
         parser.error("--timing-breakdown 用于 forward_backward 或 train 模式")
     if args.mixed_precision and args.dtype != "float32":
         parser.error("--mixed-precision 要求 --dtype float32，BF16 由 autocast 控制")
     if args.mixed_precision and args.timing_breakdown:
         parser.error("--mixed-precision 暂不支持 --timing-breakdown，请使用普通计时路径")
+    if args.memory_max_entries <= 0:
+        parser.error("--memory-max-entries 必须为正数")
+    if args.memory_snapshot is not None and not args.memory_profile:
+        parser.error("--memory-snapshot 需要 --memory-profile")
+    if args.memory_profile and torch.device(args.device).type != "cuda":
+        parser.error("--memory-profile 需要 CUDA 设备")
+    if args.memory_profile and args.timing_breakdown:
+        parser.error("--memory-profile 暂不支持 --timing-breakdown，请使用普通计时路径")
 
     return args
 
@@ -70,23 +83,26 @@ def run_step(
     *,
     mixed_precision: bool = False,
 ) -> None:
-    """三种模式计时的范围不同，初始化和随机数据生成由外部负责。"""
-    if mode not in ("forward", "forward_backward", "train"):
+    """各模式计时的范围不同，初始化和随机数据生成由外部负责。"""
+    if mode not in ("inference", "forward", "forward_backward", "train"):
         raise ValueError(f"Unknown mode: {mode}")
     if mode == "train" and optimizer is None:
         raise ValueError("train 模式需要优化器")
 
-    if mode != "forward":
+    if mode in ("forward_backward", "train"):
         # 放在计时范围内；每一步独立计算梯度，不跨步骤累积。
         model.zero_grad(set_to_none=True)
 
     # 每一步分别进入 autocast，原始参数不变；关闭时沿用原有精度。
-    with torch.autocast(device_type=inputs.device.type, dtype=torch.bfloat16) if mixed_precision else nullcontext():
+    with (
+        torch.no_grad() if mode == "inference" else nullcontext(),
+        torch.autocast(device_type=inputs.device.type, dtype=torch.bfloat16) if mixed_precision else nullcontext(),
+    ):
         # 前向传播
         with _nvtx_range("forward", inputs.device):
             logits = model(inputs)
 
-        if mode == "forward":
+        if mode in ("forward", "inference"):
             return
 
         with _nvtx_range("loss", inputs.device):
@@ -106,7 +122,15 @@ def synchronize(device: torch.device) -> None:
         torch.cuda.synchronize(device)
 
 
-def measure_steps(step: Callable[[], None], device: torch.device, warmup_steps: int, steps: int) -> list[float]:
+def measure_steps(
+    step: Callable[[], None],
+    device: torch.device,
+    warmup_steps: int,
+    steps: int,
+    *,
+    memory_snapshot: Path | None = None,
+    memory_max_entries: int = 1_000_000,
+) -> list[float]:
     """返回每个测量步骤的秒数，GPU 完成执行后才停止计时。"""
     # 排除模型初始化和数据生成留下的异步 CUDA 工作；w=0 时也需要。
     synchronize(device)
@@ -114,15 +138,41 @@ def measure_steps(step: Callable[[], None], device: torch.device, warmup_steps: 
         step()
         synchronize(device)
 
+    if memory_snapshot is not None:
+        if device.type != "cuda":
+            raise ValueError("显存历史记录需要 CUDA 设备")
+        memory_snapshot.parent.mkdir(parents=True, exist_ok=True)
+        torch.cuda.memory._record_memory_history(max_entries=memory_max_entries, clear_history=True)
+
     timings = []
-    # 只包住正式测量，便于 nsys 按 measurement 标签排除预热。
-    # 最后一步的 GPU 同步也在区间内，保证退出区间前所有工作已完成。
-    with _nvtx_range("measurement", device):
-        for _ in range(steps):
-            start = default_timer()
-            step()
-            synchronize(device)
-            timings.append(default_timer() - start)
+    execution_failed = False
+    try:
+        if memory_snapshot is not None:
+            # 只重置计数，不释放已存在的参数、梯度或优化器状态。
+            torch.cuda.reset_peak_memory_stats(device)
+        # 只包住正式测量，便于 nsys 按 measurement 标签排除预热。
+        # 最后一步的 GPU 同步也在区间内，保证退出区间前所有工作已完成。
+        with _nvtx_range("measurement", device):
+            for _ in range(steps):
+                start = default_timer()
+                step()
+                synchronize(device)
+                timings.append(default_timer() - start)
+    except BaseException:
+        execution_failed = True
+        raise
+    finally:
+        if memory_snapshot is not None:
+            try:
+                # 测量阶段 OOM 时也尝试留下分配历史，不覆盖原始异常。
+                torch.cuda.memory._dump_snapshot(str(memory_snapshot))
+                print(f"Memory snapshot saved to {memory_snapshot}", flush=True)
+            except Exception as error:
+                if not execution_failed:
+                    raise
+                warnings.warn(f"保存显存快照失败：{error}", RuntimeWarning)
+            finally:
+                torch.cuda.memory._record_memory_history(enabled=None)
     return timings
 
 
@@ -141,13 +191,20 @@ def benchmark(args: argparse.Namespace) -> dict:
         device=device,
         dtype=dtype,
     )
-    model.train()
+    model.train(args.mode != "inference")
     optimizer = AdamW(model.parameters(), lr=args.lr) if args.mode == "train" else None
 
     # 同一个随机批次用于预热和测量；采样、设备传输不计入耗时。
     tokens = torch.randint(args.vocab_size, (args.batch_size, args.context_length + 1), device=device)
     inputs = tokens[:, :-1].contiguous()
     targets = tokens[:, 1:].contiguous()
+    memory_snapshot = None
+    if args.memory_profile:
+        memory_snapshot = args.memory_snapshot
+        if memory_snapshot is None:
+            memory_snapshot = args.output.with_suffix(".pickle") if args.output is not None else Path("memory_snapshot.pickle")
+        if args.output is not None and memory_snapshot.resolve() == args.output.resolve():
+            raise ValueError("显存快照路径不能与 JSON 结果路径相同")
 
     def step() -> None:
         run_step(model, inputs, targets, args.mode, optimizer, mixed_precision=args.mixed_precision)
@@ -157,13 +214,23 @@ def benchmark(args: argparse.Namespace) -> dict:
         if args.timing_breakdown:
             timings, phase_timings = measure_training_phases(model, optimizer, inputs, targets, device, args.warmup_steps, args.steps)
         else:
-            timings = measure_steps(step, device, args.warmup_steps, args.steps)
+            timings = measure_steps(
+                step, device, args.warmup_steps, args.steps,
+                memory_snapshot=memory_snapshot, memory_max_entries=args.memory_max_entries,
+            )
             phase_timings = {}
 
-    config = {key: value for key, value in vars(args).items() if key != "output"}
+    config = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items() if key != "output"}
     return {
         "config": config,
         "autocast_dtype": "bfloat16" if args.mixed_precision else None,
+        "grad_enabled_forward": args.mode != "inference",
+        "memory_profile": {
+            "snapshot_path": str(memory_snapshot),
+            "max_entries": args.memory_max_entries,
+            "warmup_recorded": False,
+            "peak_scope": "measurement (includes pre-existing live tensors)",
+        } if memory_snapshot is not None else None,
         "model_class": f"{type(model).__module__}.{type(model).__name__}",
         "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu",
         "torch_version": str(torch.__version__),
@@ -185,6 +252,8 @@ def benchmark(args: argparse.Namespace) -> dict:
         },
         "cuda_memory_total_bytes": torch.cuda.get_device_properties(device).total_memory if device.type == "cuda" else None,
         "cuda_peak_allocated_bytes": torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None,
+        "cuda_peak_reserved_bytes": torch.cuda.max_memory_reserved(device) if device.type == "cuda" else None,
+        "cuda_peak_memory_scope": "measurement" if memory_snapshot is not None else "process_lifetime",
         "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
     }
 
