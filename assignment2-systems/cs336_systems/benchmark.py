@@ -2,6 +2,7 @@
 
 运行方式：uv run python -m cs336_systems.benchmark --mode train
 BF16 混合精度：加 --mixed-precision，模型参数仍使用默认的 float32。
+逐层激活检查点：加 --gradient-checkpointing，默认关闭。
 仅前向模式也保留自动求导记录，测量的是训练前向，而不是推理。
 真实推理使用 --mode inference；显存快照使用 --memory-profile。
 """
@@ -40,6 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda", help="cuda、cuda:0 或 cpu；CPU 用于本地检查")
     parser.add_argument("--dtype", choices=("float32", "float16", "bfloat16"), default="float32")
     parser.add_argument("--mixed-precision", action="store_true", help="使用 BF16 autocast 执行前向与损失计算，模型参数保持 FP32")
+    parser.add_argument("--gradient-checkpointing", action="store_true", help="训练时对每个 Transformer 块启用激活检查点")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=Path, help="可选：把配置和逐步耗时保存为 JSON")
@@ -190,6 +192,7 @@ def benchmark(args: argparse.Namespace) -> dict:
         rope_theta=args.rope_theta,
         device=device,
         dtype=dtype,
+        gradient_checkpointing=args.gradient_checkpointing,
     )
     model.train(args.mode != "inference")
     optimizer = AdamW(model.parameters(), lr=args.lr) if args.mode == "train" else None
@@ -307,6 +310,7 @@ def main() -> None:
     result = benchmark(args)
     print(f"model={result['model_class']} parameters={result['parameter_count']:,}")
     print(f"device={result['device_name']} dtype={args.dtype} autocast={result['autocast_dtype']} mode={args.mode}")
+    print(f"gradient_checkpointing={args.gradient_checkpointing}")
     print(f"warmup_steps={args.warmup_steps} measured_steps={args.steps}")
     for index, seconds in enumerate(result["step_times_seconds"], start=1):
         print(f"step={index} elapsed_ms={seconds * 1000:.3f}")

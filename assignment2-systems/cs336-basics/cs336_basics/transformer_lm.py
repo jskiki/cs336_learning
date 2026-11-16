@@ -6,6 +6,7 @@
 
 import torch
 from torch import Tensor, nn
+from torch.utils.checkpoint import checkpoint
 
 from cs336_basics.embedding import Embedding
 from cs336_basics.linear import Linear
@@ -43,6 +44,7 @@ class TransformerLM(nn.Module):
         eps: float = 1e-5,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
+        gradient_checkpointing: bool = False,
     ) -> None:
         """保存模型配置并创建子模块。
 
@@ -57,6 +59,7 @@ class TransformerLM(nn.Module):
             eps: 各 RMSNorm 使用的数值稳定项。
             device: 子模块参数和缓冲区所在的设备。
             dtype: 子模块参数的数据类型。
+            gradient_checkpointing: 是否在训练时对每个 Transformer 块使用激活检查点。
 
         完成标准：
             复用本包中的 Embedding、TransformerBlock、RMSNorm 和 Linear。
@@ -74,6 +77,7 @@ class TransformerLM(nn.Module):
         self.num_heads = num_heads
         self.d_ff = d_ff
         self.rope_theta = rope_theta
+        self.gradient_checkpointing = gradient_checkpointing
 
         # TODO 1：创建 self.token_embeddings。
         self.token_embeddings = Embedding(
@@ -134,7 +138,15 @@ class TransformerLM(nn.Module):
         hidden_states = self.token_embeddings(token_ids)
         # TODO 6：依次通过各个 Transformer 块，传递 token_positions。
         for layer in self.layers:
-            hidden_states = layer(hidden_states,token_positions)
+            if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
+                # 只保存块的输入，在反向传播时重新计算块内所需的激活。
+                #layer:需要执行的函数,hidden_states:这一层的输入激活,token_positions:传给这一层的位置参数
+                #use_reentrant=True：旧的重入实现,false:非重入实现
+                hidden_states = checkpoint(
+                    layer, hidden_states, token_positions, use_reentrant=False
+                )
+            else:
+                hidden_states = layer(hidden_states, token_positions)
         # TODO 7：应用最终的 RMSNorm。
         output = self.ln_final(hidden_states)
         # TODO 8：通过语言模型输出头得到并返回 logits。
