@@ -3,11 +3,14 @@
 在 assignment2-systems 目录运行：
     uv run modal run modal_benchmark.py --mode train
     uv run modal run modal_benchmark.py --mode forward --output results/b200-forward.json
+    uv run modal run modal_benchmark.py --compile --mode forward --output results/b200-compiled-forward.json
+    uv run modal run modal_benchmark.py --compile --mode train --output results/b200-compiled-train.json
     uv run modal run modal_benchmark.py --profile --mode train --output results/nsys-small-train.json
     uv run modal run modal_benchmark.py --memory-profile --mode inference --steps 1 --output results/memory-inference.json
 
 --gpu、--output 和 --profile 由这个入口处理，其余参数交给 cs336_systems.benchmark。
 云端固定使用 CUDA；默认模型配置、预热步数和测量步数沿用 benchmark.py。
+--compile 透传到 benchmark.py，整模型编译在预热时触发，结果记录编译设置。
 --profile 只采集 measurement 区间，将 JSON 和同名 .nsys-rep 一起保存到本地。
 --memory-profile 下载同名 .pickle；测量失败时仍传回可用快照和失败记录。
 """
@@ -190,7 +193,7 @@ def main(*arguments):
     output_path = args.output
     if output_path is None:
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-        kind = "memory" if args.memory_profile else "profile" if args.profile else "benchmark"
+        kind = "memory" if args.memory_profile else "profile" if args.profile else "compiled-benchmark" if "--compile" in benchmark_arguments else "benchmark"
         output_path = PROJECT_DIR / "results" / f"modal-{kind}-{stamp}-{uuid4().hex[:8]}.json"
     output_path = output_path.expanduser().resolve()
     if (args.profile or args.memory_profile) and output_path.suffix.lower() != ".json":
@@ -257,7 +260,7 @@ def main(*arguments):
     result["modal_gpu"] = args.gpu
     output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if not failed:
-        print(f"mode={result['config']['mode']} device={result['device_name']} mean_ms={result['mean_seconds'] * 1000:.3f} std_ms={result['std_seconds'] * 1000:.3f}")
+        print(f"mode={result['config']['mode']} compiled={result['config'].get('compile', False)} device={result['device_name']} mean_ms={result['mean_seconds'] * 1000:.3f} std_ms={result['std_seconds'] * 1000:.3f}")
     print(f"结果已保存到本地：{output_path}")
     if args.profile and expected_size:
         print(f"Nsight 报告已保存：{report_path}")

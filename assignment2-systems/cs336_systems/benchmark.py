@@ -1,6 +1,8 @@
 """作业 2.1.3(a)：使用我们自己的 Transformer 做端到端基准测试。
 
 运行方式：uv run python -m cs336_systems.benchmark --mode train
+整模型编译：加 --compile；首次前向/反向编译放在预热阶段，不计入正式耗时。
+仅编译 TransformerLM，损失和优化器沿用原实现；train 仍计入完整训练步骤。
 BF16 混合精度：加 --mixed-precision，模型参数仍使用默认的 float32。
 逐层激活检查点：加 --gradient-checkpointing，默认关闭。
 仅前向模式也保留自动求导记录，测量的是训练前向，而不是推理。
@@ -42,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", choices=("float32", "float16", "bfloat16"), default="float32")
     parser.add_argument("--mixed-precision", action="store_true", help="使用 BF16 autocast 执行前向与损失计算，模型参数保持 FP32")
     parser.add_argument("--gradient-checkpointing", action="store_true", help="训练时对每个 Transformer 块启用激活检查点")
+    parser.add_argument("--compile", action="store_true", help="使用 Inductor 编译整个 Transformer，编译开销由预热承担")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=Path, help="可选：把配置和逐步耗时保存为 JSON")
@@ -53,6 +56,8 @@ def parse_args() -> argparse.Namespace:
 
     if args.steps <= 0 or args.warmup_steps < 0:
         parser.error("steps 必须为正数，warmup-steps 不能为负数")
+    if args.compile and args.warmup_steps == 0:
+        parser.error("--compile 至少需要 1 轮预热，以排除首次编译开销")
     if args.timing_breakdown and args.mode in ("forward", "inference"):
         parser.error("--timing-breakdown 用于 forward_backward 或 train 模式")
     if args.mixed_precision and args.dtype != "float32":
@@ -195,6 +200,11 @@ def benchmark(args: argparse.Namespace) -> dict:
         gradient_checkpointing=args.gradient_checkpointing,
     )
     model.train(args.mode != "inference")
+    if args.compile:
+        # benchmark() 也可能被同一进程多次调用；每次使用独立编译状态。
+        torch.compiler.reset()
+        # 原地启用 torch.compile，保留模型类型、参数对象及参数名称。
+        model.compile(backend="inductor", fullgraph=True, dynamic=False)
     optimizer = AdamW(model.parameters(), lr=args.lr) if args.mode == "train" else None
 
     # 同一个随机批次用于预热和测量；采样、设备传输不计入耗时。
@@ -226,6 +236,9 @@ def benchmark(args: argparse.Namespace) -> dict:
     config = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items() if key != "output"}
     return {
         "config": config,
+        "execution_mode": "compiled" if args.compile else "eager",
+        "compile_options": {"backend": "inductor", "fullgraph": True, "dynamic": False, "mode": "default"} if args.compile else None,
+        "compile_scope": "TransformerLM forward and its autograd backward; loss and optimizer remain eager" if args.compile else None,
         "autocast_dtype": "bfloat16" if args.mixed_precision else None,
         "grad_enabled_forward": args.mode != "inference",
         "memory_profile": {
@@ -309,7 +322,7 @@ def main() -> None:
     args = parse_args()
     result = benchmark(args)
     print(f"model={result['model_class']} parameters={result['parameter_count']:,}")
-    print(f"device={result['device_name']} dtype={args.dtype} autocast={result['autocast_dtype']} mode={args.mode}")
+    print(f"device={result['device_name']} dtype={args.dtype} autocast={result['autocast_dtype']} mode={args.mode} execution={result['execution_mode']}")
     print(f"gradient_checkpointing={args.gradient_checkpointing}")
     print(f"warmup_steps={args.warmup_steps} measured_steps={args.steps}")
     for index, seconds in enumerate(result["step_times_seconds"], start=1):
