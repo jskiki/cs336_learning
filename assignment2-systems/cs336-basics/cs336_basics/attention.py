@@ -37,18 +37,18 @@ def scaled_dot_product_attention(
         被屏蔽的位置概率为 0。
         不原地修改 Q、K、V 或 mask，并保留 autograd 计算图。
     """
-    # CUDA 上记录三个计算区间；CPU 上使用空上下文。
-    with nvtx.range("attention_scores") if Q.is_cuda else nullcontext():
+    # eager CUDA 上记录区间；编译时跳过 NVTX 上下文，避免阻断整图捕获。
+    with nvtx.range("attention_scores") if Q.is_cuda and not torch.compiler.is_compiling() else nullcontext():
         # TODO 1：计算缩放后的 attention scores，形状为 (..., queries, keys)。
         scores = einsum(Q,K,"... queries d_k,... keys d_k -> ... queries keys")/sqrt(Q.shape[-1])
         # TODO 2：如果提供了 mask，在 softmax 之前处理被屏蔽的位置。
         #fill后面的_表示原地修改scores，~mask表示将布尔值取反(~表示按位取反)
         if mask is not None:
             scores.masked_fill_(~mask ,float("-inf"))
-    with nvtx.range("attention_softmax") if Q.is_cuda else nullcontext():
+    with nvtx.range("attention_softmax") if Q.is_cuda and not torch.compiler.is_compiling() else nullcontext():
         # TODO 3：调用已有的 softmax，沿 key 维度得到 attention probabilities。
         probabilities = softmax(scores,dim=-1)
-    with nvtx.range("attention_output") if Q.is_cuda else nullcontext():
+    with nvtx.range("attention_output") if Q.is_cuda and not torch.compiler.is_compiling() else nullcontext():
         # TODO 4：结合 V 得到输出，形状为 (..., queries, d_v)。
         return einsum(probabilities,V,"... queries keys,... keys d_v -> ... queries d_v")
 
