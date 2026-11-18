@@ -8,7 +8,7 @@ from torch import Tensor, nn
 from math import sqrt
 from einops import einsum,rearrange
 
-from cs336_basics.linear import Linear
+from cs336_basics.layers import Linear
 from cs336_basics.rope import RotaryPositionalEmbedding
 from cs336_basics.softmax import softmax
 

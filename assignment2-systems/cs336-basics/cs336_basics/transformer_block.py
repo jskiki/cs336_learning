@@ -8,7 +8,7 @@ import torch
 from torch import Tensor, nn
 
 from cs336_basics.attention import MultiHeadSelfAttention
-from cs336_basics.rmsnorm import RMSNorm
+from cs336_basics.layers import RMSNorm
 from cs336_basics.swiglu import SwiGLU
 from cs336_basics.rope import RotaryPositionalEmbedding
 

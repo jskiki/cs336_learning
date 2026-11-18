@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from cs336_basics.linear import Linear
+from cs336_basics.layers import Linear
 
 def silu(x: torch.Tensor) -> torch.Tensor:
     """应用 SiLU 激活函数，输入和输出的形状相同。

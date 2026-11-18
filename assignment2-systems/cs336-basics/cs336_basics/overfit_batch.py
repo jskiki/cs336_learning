@@ -8,9 +8,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from cs336_basics.adamw import AdamW
 from cs336_basics.cross_entropy import cross_entropy
 from cs336_basics.data import get_batch
+from cs336_basics.optim import AdamW
 from cs336_basics.tokenizer import Tokenizer
 from cs336_basics.train import train_step
 from cs336_basics.transformer_lm import TransformerLM

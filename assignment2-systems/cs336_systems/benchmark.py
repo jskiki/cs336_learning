@@ -21,8 +21,8 @@ from timeit import default_timer
 import torch
 import torch.cuda.nvtx as nvtx
 
-from cs336_basics.adamw import AdamW
 from cs336_basics.cross_entropy import cross_entropy
+from cs336_basics.optim import AdamW
 from cs336_basics.transformer_lm import TransformerLM
 
 

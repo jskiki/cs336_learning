@@ -9,9 +9,7 @@ import numpy as np
 from cs336_basics.data import get_batch
 from cs336_basics.transformer_lm import TransformerLM
 from cs336_basics.cross_entropy import cross_entropy
-from cs336_basics.adamw import AdamW
-from cs336_basics.lr_schedule import get_lr_cosine_schedule
-from cs336_basics.gradient_clipping import gradient_clipping
+from cs336_basics.optim import AdamW, get_lr_cosine_schedule, gradient_clipping
 from cs336_basics.checkpoint import load_checkpoint, save_checkpoint
 
 def get_hparam():

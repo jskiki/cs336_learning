@@ -8,9 +8,7 @@ import torch
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 
-from cs336_basics.embedding import Embedding
-from cs336_basics.linear import Linear
-from cs336_basics.rmsnorm import RMSNorm
+from cs336_basics.layers import Embedding, Linear, RMSNorm
 from cs336_basics.transformer_block import TransformerBlock
 
 
