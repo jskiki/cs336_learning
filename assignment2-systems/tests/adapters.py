@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 
+from cs336_systems.ddp import NaiveDDP
 from cs336_systems.flash_attention import FlashAttention2PyTorch
 
 
@@ -34,40 +35,14 @@ def get_flashattention_autograd_function_triton() -> type[torch.autograd.Functio
     return FlashAttention2Triton
 
 
-def get_ddp(module: torch.nn.Module) -> torch.nn.Module:
-    """
-    Returns a torch.nn.Module container that handles
-    parameter broadcasting and gradient synchronization for
-    distributed data parallel training.
-
-    This container should overlaps communication with backprop computation
-    by asynchronously communicating gradients as they are ready
-    in the backward pass. The gradient for each parameter tensor
-    is individually communicated.
-
-    Args:
-        module: torch.nn.Module
-            Underlying model to wrap with DDP.
-    Returns:
-        Instance of a DDP class.
-    """
-    # For example: return DDP(module)
-    raise NotImplementedError
+def get_ddp(module: torch.nn.Module) -> NaiveDDP:
+    """Wrap a model and broadcast its parameters from rank 0."""
+    return NaiveDDP(module)
 
 
-def ddp_on_after_backward(ddp_model: torch.nn.Module, optimizer: torch.optim.Optimizer):
-    """
-    Code to run after the backward pass is completed, but before we take
-    an optimizer step.
-
-    Args:
-        ddp_model: torch.nn.Module
-            DDP-wrapped model.
-        optimizer: torch.optim.Optimizer
-            Optimizer being used with the DDP-wrapped model.
-    """
-    # For example: ddp_model.finish_gradient_synchronization()
-    raise NotImplementedError
+def ddp_on_after_backward(ddp_model: NaiveDDP, optimizer: torch.optim.Optimizer) -> None:
+    """Synchronize parameter gradients before the optimizer step."""
+    ddp_model.synchronize_gradients()
 
 
 def get_fsdp(module: torch.nn.Module, compute_dtype: torch.dtype | None = None) -> torch.nn.Module:
