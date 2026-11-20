@@ -1,9 +1,10 @@
-"""作业 4.2.2(b–c)：Triton FlashAttention-2 前向。"""
+"""Triton FlashAttention-2 分块前向和反向。"""
 
 import torch
 import triton
 import triton.language as tl
 from torch import Tensor
+from torch.autograd.function import once_differentiable
 
 
 @triton.jit
@@ -109,6 +110,148 @@ def flash_fwd_kernel(
     tl.store(l_ptr, logsumexp, boundary_check=(0,))
 
 
+@triton.jit
+def _flash_bwd_row_dot(O_ptr, DO_ptr, Row_dot_ptr, N_QUERIES, D: tl.constexpr, Q_TILE_SIZE: tl.constexpr):
+    query_positions = tl.program_id(0) * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
+    rows = tl.program_id(1) * N_QUERIES + query_positions
+    offsets = rows[:, None] * D + tl.arange(0, D)[None, :]
+    valid = query_positions < N_QUERIES
+
+    output = tl.load(O_ptr + offsets, valid[:, None], other=0).to(tl.float32)
+    grad_output = tl.load(DO_ptr + offsets, valid[:, None], other=0).to(tl.float32)
+    row_dot = tl.sum(output * grad_output, axis=1)
+    tl.store(Row_dot_ptr + rows, row_dot, valid)
+
+
+@triton.jit
+def _flash_bwd_tile(query, keys, values, grad_output, logsumexp, row_dot, valid, scale):
+    scores = tl.dot(query, tl.trans(keys), input_precision="tf32x3") * scale
+    probabilities = tl.exp(tl.where(valid, scores - logsumexp[:, None], -float("inf")))
+    grad_probabilities = tl.dot(grad_output, tl.trans(values), input_precision="tf32x3")
+    grad_scores = probabilities * (grad_probabilities - row_dot[:, None])
+    return probabilities, grad_scores
+
+
+@triton.jit
+def _flash_bwd_dq(
+    Q_ptr, K_ptr, V_ptr, DO_ptr, L_ptr, Row_dot_ptr, DQ_ptr,
+    N_QUERIES, N_KEYS, scale,
+    D: tl.constexpr, Q_TILE_SIZE: tl.constexpr, K_TILE_SIZE: tl.constexpr, is_causal: tl.constexpr,
+):
+    batch_index = tl.program_id(1)
+    query_start = tl.program_id(0) * Q_TILE_SIZE
+    query_positions = query_start + tl.arange(0, Q_TILE_SIZE)
+    features = tl.arange(0, D)
+    query_rows = batch_index * N_QUERIES + query_positions
+    query_offsets = query_rows[:, None] * D + features[None, :]
+    query_valid = query_positions < N_QUERIES
+
+    query = tl.load(Q_ptr + query_offsets, query_valid[:, None], other=0)
+    grad_output = tl.load(DO_ptr + query_offsets, query_valid[:, None], other=0)
+    logsumexp = tl.load(L_ptr + query_rows, query_valid, other=0)
+    row_dot = tl.load(Row_dot_ptr + query_rows, query_valid, other=0)
+    grad_query = tl.zeros((Q_TILE_SIZE, D), tl.float32)
+
+    key_limit = N_KEYS
+    if is_causal:
+        key_limit = tl.minimum(N_KEYS, query_start + Q_TILE_SIZE)
+
+    for tile in range(tl.cdiv(key_limit, K_TILE_SIZE)):
+        key_positions = tile * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
+        key_rows = batch_index * N_KEYS + key_positions
+        key_offsets = key_rows[:, None] * D + features[None, :]
+        key_valid = key_positions < N_KEYS
+        keys = tl.load(K_ptr + key_offsets, key_valid[:, None], other=0)
+        values = tl.load(V_ptr + key_offsets, key_valid[:, None], other=0)
+
+        valid = query_valid[:, None] & key_valid[None, :]
+        if is_causal:
+            valid = valid & (query_positions[:, None] >= key_positions[None, :])
+        _, grad_scores = _flash_bwd_tile(query, keys, values, grad_output, logsumexp, row_dot, valid, scale)
+        grad_query = tl.dot(grad_scores.to(keys.dtype), keys, acc=grad_query, input_precision="tf32x3")
+
+    tl.store(DQ_ptr + query_offsets, grad_query * scale, query_valid[:, None])
+
+
+@triton.jit
+def _flash_bwd_dkv(
+    Q_ptr, K_ptr, V_ptr, DO_ptr, L_ptr, Row_dot_ptr, DK_ptr, DV_ptr,
+    N_QUERIES, N_KEYS, scale,
+    D: tl.constexpr, Q_TILE_SIZE: tl.constexpr, K_TILE_SIZE: tl.constexpr, is_causal: tl.constexpr,
+):
+    batch_index = tl.program_id(1)
+    key_start = tl.program_id(0) * K_TILE_SIZE
+    key_positions = key_start + tl.arange(0, K_TILE_SIZE)
+    features = tl.arange(0, D)
+    key_rows = batch_index * N_KEYS + key_positions
+    key_offsets = key_rows[:, None] * D + features[None, :]
+    key_valid = key_positions < N_KEYS
+
+    keys = tl.load(K_ptr + key_offsets, key_valid[:, None], other=0)
+    values = tl.load(V_ptr + key_offsets, key_valid[:, None], other=0)
+    grad_keys = tl.zeros((K_TILE_SIZE, D), tl.float32)
+    grad_values = tl.zeros((K_TILE_SIZE, D), tl.float32)
+
+    first_query_tile = 0
+    if is_causal:
+        first_query_tile = key_start // Q_TILE_SIZE
+
+    for tile in range(first_query_tile, tl.cdiv(N_QUERIES, Q_TILE_SIZE)):
+        query_positions = tile * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
+        query_rows = batch_index * N_QUERIES + query_positions
+        query_offsets = query_rows[:, None] * D + features[None, :]
+        query_valid = query_positions < N_QUERIES
+        query = tl.load(Q_ptr + query_offsets, query_valid[:, None], other=0)
+        grad_output = tl.load(DO_ptr + query_offsets, query_valid[:, None], other=0)
+        logsumexp = tl.load(L_ptr + query_rows, query_valid, other=0)
+        row_dot = tl.load(Row_dot_ptr + query_rows, query_valid, other=0)
+
+        valid = query_valid[:, None] & key_valid[None, :]
+        if is_causal:
+            valid = valid & (query_positions[:, None] >= key_positions[None, :])
+        probabilities, grad_scores = _flash_bwd_tile(query, keys, values, grad_output, logsumexp, row_dot, valid, scale)
+        grad_keys = tl.dot(tl.trans(grad_scores).to(query.dtype), query, acc=grad_keys, input_precision="tf32x3")
+        grad_values = tl.dot(
+            tl.trans(probabilities).to(grad_output.dtype), grad_output, acc=grad_values, input_precision="tf32x3",
+        )
+
+    tl.store(DK_ptr + key_offsets, grad_keys * scale, key_valid[:, None])
+    tl.store(DV_ptr + key_offsets, grad_values, key_valid[:, None])
+
+
+@once_differentiable
+def _backward_once(ctx, grad_output: Tensor) -> tuple[Tensor | None, ...]:
+    logsumexp, query, keys, values, output = ctx.saved_tensors
+    grad_output = grad_output.contiguous()
+    batch_size, n_queries, d = query.shape
+    n_keys = keys.shape[1]
+
+    row_dot = torch.empty_like(logsumexp)
+    grad_query = torch.empty_like(query)
+    grad_keys = torch.empty_like(keys)
+    grad_values = torch.empty_like(values)
+
+    q_tile_size = k_tile_size = 32
+    query_grid = (triton.cdiv(n_queries, q_tile_size), batch_size)
+    key_grid = (triton.cdiv(n_keys, k_tile_size), batch_size)
+    scale = d ** -0.5
+    with torch.cuda.device(query.device):
+        _flash_bwd_row_dot[query_grid](output, grad_output, row_dot, n_queries, d, q_tile_size)
+        # 两个内核各自持有完整的输出梯度块，写回时无需原子加法。
+        _flash_bwd_dq[query_grid](
+            query, keys, values, grad_output, logsumexp, row_dot, grad_query,
+            n_queries, n_keys, scale, d, q_tile_size, k_tile_size, ctx.is_causal,
+            num_warps=4, num_stages=2,
+        )
+        _flash_bwd_dkv[key_grid](
+            query, keys, values, grad_output, logsumexp, row_dot, grad_keys, grad_values,
+            n_queries, n_keys, scale, d, q_tile_size, k_tile_size, ctx.is_causal,
+            num_warps=4, num_stages=2,
+        )
+
+    return (grad_query, grad_keys, grad_values, None)[: len(ctx.needs_input_grad)]
+
+
 class FlashAttention2Triton(torch.autograd.Function):
     """通过 .apply 接收 (batch, sequence, d) 的 CUDA 张量。"""
 
@@ -147,10 +290,11 @@ class FlashAttention2Triton(torch.autograd.Function):
                 num_stages=2,
             )
 
-        ctx.save_for_backward(logsumexp, Q, K, V, output)
+        ctx.save_for_backward(logsumexp, query, keys, values, output)
         ctx.is_causal = is_causal
         return output
 
     @staticmethod
-    def backward(ctx, grad_output: Tensor):
-        raise NotImplementedError("FlashAttention-2 反向传播将在后续小题实现")
+    def backward(ctx, *grad_outputs: Tensor) -> tuple[Tensor | None, ...]:
+        (grad_output,) = grad_outputs
+        return _backward_once(ctx, grad_output)
