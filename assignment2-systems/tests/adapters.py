@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from cs336_systems.ddp import NaiveDDP
+from cs336_systems.ddp import OverlapDDP
 from cs336_systems.flash_attention import FlashAttention2PyTorch
 
 
@@ -35,14 +35,14 @@ def get_flashattention_autograd_function_triton() -> type[torch.autograd.Functio
     return FlashAttention2Triton
 
 
-def get_ddp(module: torch.nn.Module) -> NaiveDDP:
+def get_ddp(module: torch.nn.Module) -> OverlapDDP:
     """Wrap a model and broadcast its parameters from rank 0."""
-    return NaiveDDP(module)
+    return OverlapDDP(module)
 
 
-def ddp_on_after_backward(ddp_model: NaiveDDP, optimizer: torch.optim.Optimizer) -> None:
+def ddp_on_after_backward(ddp_model: OverlapDDP, optimizer: torch.optim.Optimizer) -> None:
     """Synchronize parameter gradients before the optimizer step."""
-    ddp_model.synchronize_gradients()
+    ddp_model.finish_gradient_synchronization()
 
 
 def get_fsdp(module: torch.nn.Module, compute_dtype: torch.dtype | None = None) -> torch.nn.Module:
