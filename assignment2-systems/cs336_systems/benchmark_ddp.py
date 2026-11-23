@@ -1,9 +1,10 @@
-"""测试 XL Transformer 在单机双卡上使用朴素 DDP 的训练耗时。"""
+"""测试 XL Transformer 在单机双卡上使用不同 DDP 同步方式的训练耗时。"""
 
 import argparse
 import json
 import os
 import statistics
+from contextlib import nullcontext
 from pathlib import Path
 from timeit import default_timer
 
@@ -15,11 +16,12 @@ from torch.multiprocessing.spawn import spawn
 from cs336_basics.cross_entropy import cross_entropy
 from cs336_basics.optim import AdamW
 from cs336_basics.transformer_lm import TransformerLM
-from cs336_systems.benchmark import synchronize
-from cs336_systems.ddp import FlatDDP, NaiveDDP
+from cs336_systems.benchmark import _nvtx_range, synchronize
+from cs336_systems.ddp import FlatDDP, NaiveDDP, OverlapDDP
 
 
 WORLD_SIZE = 2
+DDP_CLASSES = {"individual": NaiveDDP, "flat": FlatDDP, "overlap": OverlapDDP}
 
 
 def train_step(
@@ -28,24 +30,29 @@ def train_step(
     inputs: Tensor,
     targets: Tensor,
     sync_events: tuple[torch.cuda.Event, torch.cuda.Event] | None,
+    *,
+    profile: bool = False,
 ) -> tuple[float, float]:
     step_start = default_timer()
     model.zero_grad(set_to_none=True)
-    cross_entropy(inputs=model(inputs), targets=targets).backward()
+    with _nvtx_range("DDP forward and loss", inputs.device) if profile else nullcontext():
+        loss = cross_entropy(inputs=model(inputs), targets=targets)
+    with _nvtx_range("DDP backward", inputs.device) if profile else nullcontext():
+        loss.backward()
 
     sync_start = default_timer()
-    # NCCL 的同步调用会在当前 CUDA stream 上建立等待关系。
-    # 用事件包住同步阶段，整步仅在优化器更新之后做一次主机同步。
+    # 这里只计反向之后的同步阶段，overlap 模式已在反向中提交部分通信。
     if sync_events is not None:
         sync_events[0].record()
-    #调用NaiveDDP里的梯度计算，上下两个record记录时间戳，可以计算梯度同步阶段的耗时
-    model.synchronize_gradients()
+    with _nvtx_range("DDP gradient sync", inputs.device) if profile else nullcontext():
+        model.synchronize_gradients()
     if sync_events is not None:
         sync_events[1].record()
     #兼容cpu/Gloo模式计算耗时
     sync_seconds = default_timer() - sync_start
 
-    optimizer.step()
+    with _nvtx_range("DDP optimizer", inputs.device) if profile else nullcontext():
+        optimizer.step()
     #等GPU跑完
     synchronize(inputs.device)
     #得到一整步的耗时，这是单卡计时，最后结果取最慢的
@@ -67,7 +74,7 @@ def benchmark_worker(rank: int, args: argparse.Namespace) -> None:
     dist.init_process_group(backend, rank=rank, world_size=WORLD_SIZE, device_id=device if use_cuda else None)
     try:
         torch.manual_seed(args.seed)
-        ddp_class = FlatDDP if args.gradient_sync == "flat" else NaiveDDP
+        ddp_class = DDP_CLASSES[args.gradient_sync]
         model = ddp_class(
             TransformerLM(
                 vocab_size=args.vocab_size,
@@ -102,7 +109,15 @@ def benchmark_worker(rank: int, args: argparse.Namespace) -> None:
 
         dist.barrier()
         synchronize(device)
-        samples = [train_step(model, optimizer, inputs, targets, sync_events) for _ in range(args.steps)]
+        # rank 0 触发整个进程树的采集，两个 rank 都完成后才关闭采集范围。
+        with _nvtx_range("measurement", device) if args.profile and rank == 0 else nullcontext():
+            if args.profile:
+                dist.barrier()
+                synchronize(device)
+            samples = [train_step(model, optimizer, inputs, targets, sync_events, profile=args.profile) for _ in range(args.steps)]
+            if args.profile:
+                dist.barrier()
+                synchronize(device)
 
         # 对同一步的两项耗时分别取最慢 rank。统计归约在正式计时之外。
         timings = torch.tensor(samples, device=device, dtype=torch.float64)
@@ -111,6 +126,7 @@ def benchmark_worker(rank: int, args: argparse.Namespace) -> None:
             step_times, sync_times = timings.T.tolist()
             step_mean = statistics.mean(step_times)
             sync_mean = statistics.mean(sync_times)
+            overlap = args.gradient_sync == "overlap"
             result = {
                 "config": {key: value for key, value in vars(args).items() if key != "output"} | {"dtype": "float32"},
                 "world_size": WORLD_SIZE,
@@ -125,6 +141,7 @@ def benchmark_worker(rank: int, args: argparse.Namespace) -> None:
                 "step_times_seconds": step_times,
                 "mean_seconds": step_mean,
                 "std_seconds": statistics.stdev(step_times) if len(step_times) > 1 else 0.0,
+                "gradient_sync_timing_scope": "post_backward_tail" if overlap else "full_gradient_sync",
                 "gradient_sync_times_seconds": sync_times,
                 "gradient_sync_mean_seconds": sync_mean,
                 "gradient_sync_std_seconds": statistics.stdev(sync_times) if len(sync_times) > 1 else 0.0,
@@ -135,8 +152,13 @@ def benchmark_worker(rank: int, args: argparse.Namespace) -> None:
                 f"全局 batch {args.batch_size}，每卡 batch {inputs.size(0)}，序列长度 {args.context_length}"
             )
             print(f"预热 {args.warmup_steps} 步，测量 {args.steps} 步，梯度同步模式 {args.gradient_sync}。")
-            print("梯度同步耗时包括 all-reduce、本地平均，以及 flat 模式的拼接和拆回。")
-            print("| 单步总耗时 (ms) | 梯度同步耗时 (ms) | 同步占比 |")
+            if overlap:
+                sync_label = "反向后同步尾段"
+                print("反向后同步尾段包含剩余通信的提交与等待，以及本地梯度平均。")
+            else:
+                sync_label = "梯度同步"
+                print("梯度同步耗时包括 all-reduce、本地平均，以及 flat 模式的拼接和拆回。")
+            print(f"| 单步总耗时 (ms) | {sync_label} (ms) | 占单步比例 |")
             print("| ---: | ---: | ---: |")
             print(
                 f"| {step_mean * 1000:.3f} ± {result['std_seconds'] * 1000:.3f} "
@@ -154,7 +176,7 @@ def benchmark_worker(rank: int, args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda", help="CPU/Gloo 用于小尺寸本地验证")
-    parser.add_argument("--gradient-sync", choices=("individual", "flat"), default="individual", help="逐参数或展平合并梯度后通信")
+    parser.add_argument("--gradient-sync", choices=DDP_CLASSES, default="individual", help="逐参数、展平合并或与反向重叠的梯度同步")
     parser.add_argument("--vocab-size", type=int, default=10_000)
     parser.add_argument("--batch-size", type=int, default=4, help="全局 batch size")
     parser.add_argument("--context-length", type=int, default=512)
@@ -168,6 +190,7 @@ def main() -> None:
     parser.add_argument("--cpu-threads", type=int, default=4, help="每个 rank 的 PyTorch CPU 线程数")
     parser.add_argument("--warmup-steps", type=int, default=5)
     parser.add_argument("--steps", type=int, default=10)
+    parser.add_argument("--profile", action="store_true", help="为 Nsight Systems 标记正式测量与各训练阶段")
     parser.add_argument("--output", type=Path, help="可选 JSON 结果路径")
     args = parser.parse_args()
 

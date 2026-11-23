@@ -6,6 +6,7 @@
     uv run modal run modal_benchmark.py --compile --mode forward --output results/b200-compiled-forward.json
     uv run modal run modal_benchmark.py --compile --mode train --output results/b200-compiled-train.json
     uv run modal run modal_benchmark.py --profile --mode train --output results/nsys-small-train.json
+    uv run modal run modal_benchmark.py --ddp --profile --gradient-sync overlap --steps 1 --output results/b200-ddp/overlap-nsys.json
     uv run modal run modal_benchmark.py --memory-profile --mode inference --steps 1 --output results/memory-inference.json
 
 --gpu、--output 和 --profile 由这个入口处理，其余参数交给 cs336_systems.benchmark。
@@ -69,12 +70,12 @@ image = (
 )
 
 
-def benchmark_command(arguments: list[str], output_path: Path) -> list[str]:
+def benchmark_command(arguments: list[str], output_path: Path, *, ddp: bool = False) -> list[str]:
     return [
         REMOTE_PYTHON,
         "-u",
         "-m",
-        "cs336_systems.benchmark",
+        "cs336_systems.benchmark_ddp" if ddp else "cs336_systems.benchmark",
         *arguments,
         "--device",
         "cuda",
@@ -102,7 +103,7 @@ def profile_command(command: list[str], report_prefix: Path) -> list[str]:
 
 
 @app.function(image=image, gpu="B200", timeout=60 * 60)
-def run_benchmark(arguments: list[str], profile: bool = False, memory_profile: bool = False) -> Iterator[dict]:
+def run_benchmark(arguments: list[str], profile: bool = False, memory_profile: bool = False, ddp: bool = False) -> Iterator[dict]:
     """先返回指标，再按 1 MiB 分块传回报告，不依赖容器磁盘持久化。"""
     #--timing-breakdown，是分段计时
     if profile and "--timing-breakdown" in arguments:
@@ -115,7 +116,9 @@ def run_benchmark(arguments: list[str], profile: bool = False, memory_profile: b
         report_prefix = Path(directory) / "profile"
         report_path = report_prefix.with_suffix(".nsys-rep")
         snapshot_path = Path(directory) / "memory_snapshot.pickle"
-        command = benchmark_command(arguments, output_path)
+        command = benchmark_command(arguments, output_path, ddp=ddp)
+        if ddp and profile:
+            command.append("--profile")
         if memory_profile:
             command.extend(["--memory-profile", "--memory-snapshot", str(snapshot_path)])
         env = os.environ.copy()
@@ -176,12 +179,16 @@ def main(*arguments):
         epilog="其余参数直接转交给基准测试，例如 --mode train --warmup-steps 5 --steps 10。设备固定为 CUDA。",
         allow_abbrev=False,
     )
-    parser.add_argument("--gpu", default="B200", help="Modal GPU 类型，默认为 B200")
+    parser.add_argument("--gpu", help="Modal GPU 类型，默认 B200，DDP 默认 B200:2")
+    parser.add_argument("--ddp", action="store_true", help="运行单机双卡 DDP 基准测试")
     parser.add_argument("--output", type=Path, help="本地 JSON 路径；相对路径以当前工作目录为起点")
     parser.add_argument("--profile", action="store_true", help="用 Nsight Systems 采集正式测量区间，并下载同名 .nsys-rep 报告")
     parser.add_argument("--memory-profile", action="store_true", help="采集正式测量的显存历史，并下载 .pickle 快照")
     parser.add_argument("--memory-snapshot", type=Path, help="本地快照路径；默认与 output 同名，后缀为 .pickle")
     args, benchmark_arguments = parser.parse_known_args(arguments)
+    args.gpu = args.gpu or ("B200:2" if args.ddp else "B200")
+    if args.ddp and args.memory_profile:
+        parser.error("DDP 基准使用 --profile 采集 Nsight 时间线")
     if args.profile and "--timing-breakdown" in benchmark_arguments:
         parser.error("--profile 不与 --timing-breakdown 同用；普通路径已有 NVTX 标签")
     if args.memory_snapshot is not None and not args.memory_profile:
@@ -213,7 +220,10 @@ def main(*arguments):
         print(f"显存快照：{snapshot_path}；记录不包含预热阶段。", flush=True)
     if args.profile:
         print(f"Nsight 报告：{report_path}；采集耗时包含分析工具开销。", flush=True)
-    target = run_benchmark if args.gpu == "B200" else run_benchmark.with_options(gpu=args.gpu)
+    if args.ddp:
+        target = run_benchmark.with_options(gpu=args.gpu, cpu=8, memory=16 * 1024)
+    else:
+        target = run_benchmark if args.gpu == "B200" else run_benchmark.with_options(gpu=args.gpu)
     result = None
     expected_size = 0
     received_size = 0
@@ -223,7 +233,7 @@ def main(*arguments):
     with ExitStack() as stack:
         report_file = stack.enter_context(partial_path.open("wb")) if args.profile else None
         snapshot_file = stack.enter_context(snapshot_partial_path.open("wb")) if args.memory_profile else None
-        packets = target.remote_gen(benchmark_arguments, args.profile, True) if args.memory_profile else target.remote_gen(benchmark_arguments, args.profile)
+        packets = target.remote_gen(benchmark_arguments, args.profile, args.memory_profile, args.ddp)
         for packet in packets:
             if packet["kind"] == "result":
                 result = packet["result"]
@@ -260,7 +270,8 @@ def main(*arguments):
     result["modal_gpu"] = args.gpu
     output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if not failed:
-        print(f"mode={result['config']['mode']} compiled={result['config'].get('compile', False)} device={result['device_name']} mean_ms={result['mean_seconds'] * 1000:.3f} std_ms={result['std_seconds'] * 1000:.3f}")
+        mode = result["config"]["gradient_sync" if args.ddp else "mode"]
+        print(f"mode={mode} compiled={result['config'].get('compile', False)} device={result['device_name']} mean_ms={result['mean_seconds'] * 1000:.3f} std_ms={result['std_seconds'] * 1000:.3f}")
     print(f"结果已保存到本地：{output_path}")
     if args.profile and expected_size:
         print(f"Nsight 报告已保存：{report_path}")
