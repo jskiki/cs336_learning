@@ -113,27 +113,29 @@ def benchmark_worker(rank: int, args: argparse.Namespace) -> None:
         memory_samples = {} if args.optimizer_memory else None
         if memory_samples is not None:
             torch.cuda.reset_peak_memory_stats(device)
-        model = ddp_class(
-            TransformerLM(
-                vocab_size=args.vocab_size,
-                context_length=args.context_length,
-                d_model=args.d_model,
-                d_ff=args.d_ff,
-                num_layers=args.num_layers,
-                num_heads=args.num_heads,
-                rope_theta=args.rope_theta,
-                device=device,
-                dtype=torch.float32,
-            )
+        module = TransformerLM(
+            vocab_size=args.vocab_size,
+            context_length=args.context_length,
+            d_model=args.d_model,
+            d_ff=args.d_ff,
+            num_layers=args.num_layers,
+            num_heads=args.num_heads,
+            rope_theta=args.rope_theta,
+            device=device,
+            dtype=torch.float32,
         )
+        optimizer = (
+            ShardedOptimizer(module.parameters(), AdamW, lr=args.lr)
+            if args.shard_optimizer else AdamW(module.parameters(), lr=args.lr)
+        )
+        if args.reduce_to_owner:
+            assert isinstance(optimizer, ShardedOptimizer)
+            model = OverlapDDP(module, gradient_owner=optimizer.parameter_owner)
+        else:
+            model = ddp_class(module)
         if memory_samples is not None:
             synchronize(device)
             memory_samples["after_model_init"] = sample_cuda_memory(model, device)
-
-        optimizer = (
-            ShardedOptimizer(model.parameters(), AdamW, lr=args.lr)
-            if args.shard_optimizer else AdamW(model.parameters(), lr=args.lr)
-        )
 
         # 复用单卡的随机数据构造方式，再沿 batch 维给每个 rank 分一半。
         shape = (args.batch_size, args.context_length + 1)
@@ -245,6 +247,7 @@ def main() -> None:
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda", help="CPU/Gloo 用于小尺寸本地验证")
     parser.add_argument("--gradient-sync", choices=DDP_CLASSES, default="individual", help="逐参数、展平合并或与反向重叠的梯度同步")
     parser.add_argument("--shard-optimizer", action="store_true", help="使用分片 AdamW")
+    parser.add_argument("--reduce-to-owner", action="store_true", help="将梯度归约到负责更新参数的 rank")
     parser.add_argument("--optimizer-memory", action="store_true", help="独立采集 CUDA 显存，默认测第一次训练步")
     parser.add_argument("--vocab-size", type=int, default=10_000)
     parser.add_argument("--batch-size", type=int, default=4, help="全局 batch size")
@@ -273,6 +276,8 @@ def main() -> None:
         parser.error("测量步数和 CPU 线程数必须为正，预热步数可以为 0")
     if args.optimizer_memory and (args.device != "cuda" or args.steps != 1 or args.profile):
         parser.error("--optimizer-memory 用于在 CUDA 上独立采集 1 步显存")
+    if args.reduce_to_owner and (args.gradient_sync != "overlap" or not args.shard_optimizer):
+        parser.error("--reduce-to-owner 需要同时指定 --gradient-sync overlap 和 --shard-optimizer")
     if args.device == "cuda" and torch.cuda.device_count() < WORLD_SIZE:
         parser.error("CUDA 基准需要同一台机器上有两张可见 GPU")
 

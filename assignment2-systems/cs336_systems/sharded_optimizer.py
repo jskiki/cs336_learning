@@ -72,6 +72,10 @@ class ShardedOptimizer(Optimizer):
         self._owners.update(owners)
         self._elements_by_rank = elements_by_rank
 
+    def parameter_owner(self, param: Tensor) -> int:
+        """返回负责更新该参数的 rank。"""
+        return self._owners[param]
+
     def step(self, closure: Callable[[], Any] | None = None, **kwargs: Any) -> Any:
         """更新本地分片，随后同步更新后的模型参数。"""
         # TODO：将当前参数组设置、closure 和 kwargs 传给内层优化器。

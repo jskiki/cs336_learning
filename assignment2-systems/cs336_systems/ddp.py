@@ -1,5 +1,7 @@
 """分布式数据并行的梯度同步实现。"""
 
+from collections.abc import Callable
+
 import torch
 import torch.distributed as dist
 from torch import nn
@@ -54,19 +56,25 @@ class FlatDDP(NaiveDDP):
 class OverlapDDP(NaiveDDP):
     """在反向传播期间异步同步梯度。各 rank 每步须使用相同的参数集合。"""
 
-    def __init__(self, module: nn.Module) -> None:
+    def __init__(self, module: nn.Module, *, gradient_owner: Callable[[nn.Parameter], int] | None = None) -> None:
+        """提供 gradient_owner 时，只将平均梯度交给负责更新该参数的 rank。"""
         super().__init__(module)
+        self._rank = dist.get_rank()
         # 按固定顺序提交通信，避免不同 rank 的钩子触发顺序不同时归约错配。
         # 逆参数注册顺序通常更接近逐层反向传播的顺序。
-        self._sync_order = [param for param in reversed(list(module.parameters())) if param.requires_grad]
+        self._sync_order = [
+            (param, gradient_owner(param) if gradient_owner is not None else None)
+            for param in reversed(list(module.parameters()))
+            if param.requires_grad
+        ]
         #用于保存已经算完还没有提交通信的梯度
         self._ready_gradients: dict[nn.Parameter, torch.Tensor] = {}
-        #已经提交的通信 [梯度张量，通信句柄]通信句柄是 PyTorch 返回的一个 Work 对象，用来跟踪某一次异步通信
-        self._pending_reductions: list[tuple[torch.Tensor, dist.Work]] = []
+        # 保存通信句柄，以及本 rank 需要取平均的梯度。
+        self._pending_reductions: list[tuple[torch.Tensor | None, dist.Work]] = []
         #_sync_order 中下一个需要处理的位置。
         self._next_param = 0
         #给每个可训练的参数注册钩子（当反向传播更新某个参数时自动调用后面传入的函数）
-        for param in self._sync_order:
+        for param, _ in self._sync_order:
             param.register_post_accumulate_grad_hook(self._on_grad_ready)
 
     def _on_grad_ready(self, param: nn.Parameter) -> None:
@@ -77,16 +85,20 @@ class OverlapDDP(NaiveDDP):
 
     def _launch_ready_gradients(self, *, backward_finished: bool = False) -> None:
         while self._next_param < len(self._sync_order):
-            param = self._sync_order[self._next_param]
+            param, owner = self._sync_order[self._next_param]
             grad = self._ready_gradients.pop(param, None)
             if grad is None and not backward_finished:
                 return
 
             self._next_param += 1
             if grad is not None:
-                work = dist.all_reduce(grad, op=dist.ReduceOp.SUM, async_op=True)
+                if owner is None:
+                    work = dist.all_reduce(grad, op=dist.ReduceOp.SUM, async_op=True)
+                else:
+                    work = dist.reduce(grad, dst=owner, op=dist.ReduceOp.SUM, async_op=True)
                 assert work is not None
-                self._pending_reductions.append((grad, work))
+                average_grad = grad if owner is None or owner == self._rank else None
+                self._pending_reductions.append((average_grad, work))
 
     @torch.no_grad()
     def finish_gradient_synchronization(self) -> None:
@@ -95,7 +107,8 @@ class OverlapDDP(NaiveDDP):
         self._launch_ready_gradients(backward_finished=True)
         for grad, work in self._pending_reductions:
             work.wait()
-            grad.div_(self.world_size)
+            if grad is not None:
+                grad.div_(self.world_size)
 
         self._pending_reductions.clear()
         self._next_param = 0
