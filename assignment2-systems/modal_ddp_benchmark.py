@@ -55,7 +55,7 @@ def main(*arguments):
     compare = args.gradient_sync == "all"
     modes = list(GRADIENT_SYNC_MODES) if compare else [args.gradient_sync]
     results = run_ddp_benchmark.with_options(gpu=args.gpu).remote(benchmark_arguments, modes)
-    if compare:
+    if compare and all("mean_seconds" in sample for sample in results.values()):
         print("| 同步模式 | 单步总耗时 (ms，均值 ± 标准差) | 相对逐参数的加速比 |")
         print("| --- | ---: | ---: |")
         baseline = results["individual"]["mean_seconds"]

@@ -7,31 +7,59 @@ import statistics
 from contextlib import nullcontext
 from pathlib import Path
 from timeit import default_timer
+from typing import Any
 
 import torch
 import torch.distributed as dist
 from torch import Tensor
 from torch.multiprocessing.spawn import spawn
+from torch.optim import Optimizer
 
 from cs336_basics.cross_entropy import cross_entropy
 from cs336_basics.optim import AdamW
 from cs336_basics.transformer_lm import TransformerLM
 from cs336_systems.benchmark import _nvtx_range, synchronize
 from cs336_systems.ddp import FlatDDP, NaiveDDP, OverlapDDP
+from cs336_systems.sharded_optimizer import ShardedOptimizer
 
 
 WORLD_SIZE = 2
 DDP_CLASSES = {"individual": NaiveDDP, "flat": FlatDDP, "overlap": OverlapDDP}
 
 
+def sample_cuda_memory(model: NaiveDDP, device: torch.device, optimizer: Optimizer | None = None) -> dict:
+    """读取阶段峰值，并按实际张量大小核算检查点的存量。"""
+    allocated = torch.cuda.memory_allocated(device)
+    peak = torch.cuda.max_memory_allocated(device)
+    params = list(model.parameters())
+    components = {
+        "parameters": sum(p.numel() * p.element_size() for p in params),
+        "gradients": sum(grad.numel() * grad.element_size() for p in params if (grad := p.grad) is not None),
+        "model_buffers": sum(buf.numel() * buf.element_size() for buf in model.buffers()),
+        "optimizer_state": sum(
+            value.numel() * value.element_size()
+            for state in optimizer.state.values()
+            for value in state.values()
+            if isinstance(value, Tensor) and value.device == device
+        ) if optimizer is not None else 0,
+    }
+    return {
+        "allocated_bytes": allocated,
+        "phase_peak_allocated_bytes": peak,
+        "components_bytes": components,
+        "other_allocated_bytes": allocated - sum(components.values()),
+    }
+
+
 def train_step(
     model: NaiveDDP,
-    optimizer: AdamW,
+    optimizer: Optimizer,
     inputs: Tensor,
     targets: Tensor,
     sync_events: tuple[torch.cuda.Event, torch.cuda.Event] | None,
     *,
     profile: bool = False,
+    memory_samples: dict[str, dict] | None = None,
 ) -> tuple[float, float]:
     step_start = default_timer()
     model.zero_grad(set_to_none=True)
@@ -51,6 +79,11 @@ def train_step(
     #兼容cpu/Gloo模式计算耗时
     sync_seconds = default_timer() - sync_start
 
+    if memory_samples is not None:
+        synchronize(inputs.device)
+        memory_samples["before_optimizer_step"] = sample_cuda_memory(model, inputs.device, optimizer)
+        torch.cuda.reset_peak_memory_stats(inputs.device)
+
     with _nvtx_range("DDP optimizer", inputs.device) if profile else nullcontext():
         optimizer.step()
     #等GPU跑完
@@ -59,6 +92,8 @@ def train_step(
     step_seconds = default_timer() - step_start
     if sync_events is not None:
         sync_seconds = sync_events[0].elapsed_time(sync_events[1]) / 1000
+    if memory_samples is not None:
+        memory_samples["after_optimizer_step"] = sample_cuda_memory(model, inputs.device, optimizer)
     return step_seconds, sync_seconds
 
 
@@ -75,6 +110,9 @@ def benchmark_worker(rank: int, args: argparse.Namespace) -> None:
     try:
         torch.manual_seed(args.seed)
         ddp_class = DDP_CLASSES[args.gradient_sync]
+        memory_samples = {} if args.optimizer_memory else None
+        if memory_samples is not None:
+            torch.cuda.reset_peak_memory_stats(device)
         model = ddp_class(
             TransformerLM(
                 vocab_size=args.vocab_size,
@@ -88,7 +126,14 @@ def benchmark_worker(rank: int, args: argparse.Namespace) -> None:
                 dtype=torch.float32,
             )
         )
-        optimizer = AdamW(model.parameters(), lr=args.lr)
+        if memory_samples is not None:
+            synchronize(device)
+            memory_samples["after_model_init"] = sample_cuda_memory(model, device)
+
+        optimizer = (
+            ShardedOptimizer(model.parameters(), AdamW, lr=args.lr)
+            if args.shard_optimizer else AdamW(model.parameters(), lr=args.lr)
+        )
 
         # 复用单卡的随机数据构造方式，再沿 batch 维给每个 rank 分一半。
         shape = (args.batch_size, args.context_length + 1)
@@ -102,13 +147,44 @@ def benchmark_worker(rank: int, args: argparse.Namespace) -> None:
         inputs = local_tokens[:, :-1].contiguous()
         targets = local_tokens[:, 1:].contiguous()
 
-        sync_events = (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)) if use_cuda else None
+        sync_events = (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)) if use_cuda and memory_samples is None else None
         synchronize(device)
         for _ in range(args.warmup_steps):
             train_step(model, optimizer, inputs, targets, sync_events)
 
         dist.barrier()
         synchronize(device)
+        result: dict[str, Any] = {
+            "config": {key: value for key, value in vars(args).items() if key != "output"} | {"dtype": "float32"},
+            "world_size": WORLD_SIZE,
+            "local_batch_size": inputs.size(0),
+            "backend": backend,
+            "device_name": torch.cuda.get_device_name(device) if use_cuda else "cpu",
+            "torch_version": str(torch.__version__),
+            "cuda_runtime_version": torch.version.cuda,
+            "cuda_matmul_allow_tf32": False if use_cuda else None,
+            "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
+        }
+        if memory_samples is not None:
+            torch.cuda.reset_peak_memory_stats(device)
+            train_step(model, optimizer, inputs, targets, None, memory_samples=memory_samples)
+            samples_by_rank: list[dict[str, dict]] = [{} for _ in range(WORLD_SIZE)]
+            dist.all_gather_object(samples_by_rank, memory_samples)
+            if rank == 0:
+                result["memory_profile"] = {
+                    "training_step": args.warmup_steps + 1,
+                    "peak_scope": "allocation peak in each phase; component bytes at each phase end",
+                    "by_rank": samples_by_rank,
+                }
+                print(f"第 {args.warmup_steps + 1} 步显存分段峰值，单位 GiB")
+                for sample_rank, stages in enumerate(samples_by_rank):
+                    for stage, sample in stages.items():
+                        print(f"rank {sample_rank}  {stage}: {sample['phase_peak_allocated_bytes'] / 2**30:.3f}")
+                if args.output is not None:
+                    args.output.parent.mkdir(parents=True, exist_ok=True)
+                    args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            return
+
         # rank 0 触发整个进程树的采集，两个 rank 都完成后才关闭采集范围。
         with _nvtx_range("measurement", device) if args.profile and rank == 0 else nullcontext():
             if args.profile:
@@ -127,16 +203,7 @@ def benchmark_worker(rank: int, args: argparse.Namespace) -> None:
             step_mean = statistics.mean(step_times)
             sync_mean = statistics.mean(sync_times)
             overlap = args.gradient_sync == "overlap"
-            result = {
-                "config": {key: value for key, value in vars(args).items() if key != "output"} | {"dtype": "float32"},
-                "world_size": WORLD_SIZE,
-                "local_batch_size": inputs.size(0),
-                "backend": backend,
-                "device_name": torch.cuda.get_device_name(device) if use_cuda else "cpu",
-                "torch_version": str(torch.__version__),
-                "cuda_runtime_version": torch.version.cuda,
-                "cuda_matmul_allow_tf32": False if use_cuda else None,
-                "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
+            result.update({
                 "timing_aggregation": "max across ranks for each metric and step; sample standard deviation",
                 "step_times_seconds": step_times,
                 "mean_seconds": step_mean,
@@ -146,7 +213,7 @@ def benchmark_worker(rank: int, args: argparse.Namespace) -> None:
                 "gradient_sync_mean_seconds": sync_mean,
                 "gradient_sync_std_seconds": statistics.stdev(sync_times) if len(sync_times) > 1 else 0.0,
                 "gradient_sync_percent": 100 * sync_mean / step_mean,
-            }
+            })
             print(
                 f"{result['device_name']} / {backend}，FP32，{result['parameter_count']:,} 参数，"
                 f"全局 batch {args.batch_size}，每卡 batch {inputs.size(0)}，序列长度 {args.context_length}"
@@ -177,6 +244,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda", help="CPU/Gloo 用于小尺寸本地验证")
     parser.add_argument("--gradient-sync", choices=DDP_CLASSES, default="individual", help="逐参数、展平合并或与反向重叠的梯度同步")
+    parser.add_argument("--shard-optimizer", action="store_true", help="使用分片 AdamW")
+    parser.add_argument("--optimizer-memory", action="store_true", help="独立采集 CUDA 显存，默认测第一次训练步")
     parser.add_argument("--vocab-size", type=int, default=10_000)
     parser.add_argument("--batch-size", type=int, default=4, help="全局 batch size")
     parser.add_argument("--context-length", type=int, default=512)
@@ -188,16 +257,22 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cpu-threads", type=int, default=4, help="每个 rank 的 PyTorch CPU 线程数")
-    parser.add_argument("--warmup-steps", type=int, default=5)
-    parser.add_argument("--steps", type=int, default=10)
+    parser.add_argument("--warmup-steps", type=int, help="速度测试默认 5 步，显存测试默认 0 步")
+    parser.add_argument("--steps", type=int, help="速度测试默认 10 步，显存测试采样 1 步")
     parser.add_argument("--profile", action="store_true", help="为 Nsight Systems 标记正式测量与各训练阶段")
     parser.add_argument("--output", type=Path, help="可选 JSON 结果路径")
     args = parser.parse_args()
+    if args.warmup_steps is None:
+        args.warmup_steps = 0 if args.optimizer_memory else 5
+    if args.steps is None:
+        args.steps = 1 if args.optimizer_memory else 10
 
     if args.batch_size <= 0 or args.batch_size % WORLD_SIZE:
         parser.error("全局 batch size 必须是 2 的正整数倍")
     if args.steps <= 0 or args.warmup_steps < 0 or args.cpu_threads <= 0:
         parser.error("测量步数和 CPU 线程数必须为正，预热步数可以为 0")
+    if args.optimizer_memory and (args.device != "cuda" or args.steps != 1 or args.profile):
+        parser.error("--optimizer-memory 用于在 CUDA 上独立采集 1 步显存")
     if args.device == "cuda" and torch.cuda.device_count() < WORLD_SIZE:
         parser.error("CUDA 基准需要同一台机器上有两张可见 GPU")
 
