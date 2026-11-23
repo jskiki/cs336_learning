@@ -4,6 +4,7 @@ import argparse
 import json
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 
 import modal
@@ -28,7 +29,7 @@ image = (
 
 
 @app.function(image=image, gpu=DEFAULT_GPU, cpu=8, memory=16 * 1024, timeout=300)
-def run_ddp_benchmark(arguments: list[str], modes: list[str]) -> dict:
+def run_ddp_benchmark(arguments: list[str], modes: Sequence[str]) -> dict:
     results = {}
     with tempfile.TemporaryDirectory() as directory:
         for mode in modes:
