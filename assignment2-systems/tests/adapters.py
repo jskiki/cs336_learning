@@ -4,6 +4,7 @@ import torch
 
 from cs336_systems.ddp import OverlapDDP
 from cs336_systems.flash_attention import FlashAttention2PyTorch
+from cs336_systems.fsdp import FSDP
 from cs336_systems.sharded_optimizer import ShardedOptimizer
 
 
@@ -46,7 +47,7 @@ def ddp_on_after_backward(ddp_model: OverlapDDP, optimizer: torch.optim.Optimize
     ddp_model.finish_gradient_synchronization()
 
 
-def get_fsdp(module: torch.nn.Module, compute_dtype: torch.dtype | None = None) -> torch.nn.Module:
+def get_fsdp(module: torch.nn.Module, compute_dtype: torch.dtype | None = None) -> FSDP:
     """
     Returns a torch.nn.Module container that handles
     fully-sharded data parallel training, including weight sharding,
@@ -61,11 +62,10 @@ def get_fsdp(module: torch.nn.Module, compute_dtype: torch.dtype | None = None) 
     Returns:
         Instance of an FSDP class.
     """
-    # For example: return FSDP(module, compute_dtype=compute_dtype)
-    raise NotImplementedError
+    return FSDP(module, compute_dtype=compute_dtype)
 
 
-def fsdp_on_after_backward(fsdp_model: torch.nn.Module, optimizer: torch.optim.Optimizer):
+def fsdp_on_after_backward(fsdp_model: FSDP, optimizer: torch.optim.Optimizer) -> None:
     """
     Code to run after the backward pass is completed, but before we take
     an optimizer step.
@@ -76,11 +76,10 @@ def fsdp_on_after_backward(fsdp_model: torch.nn.Module, optimizer: torch.optim.O
         optimizer: torch.optim.Optimizer
             Optimizer being used with the FSDP-wrapped model.
     """
-    # For example: fsdp_model.finish_gradient_synchronization()
-    raise NotImplementedError
+    fsdp_model.finish_gradient_synchronization()
 
 
-def fsdp_gather_full_params(fsdp_model: torch.nn.Module) -> dict[str, torch.Tensor]:
+def fsdp_gather_full_params(fsdp_model: FSDP) -> dict[str, torch.Tensor]:
     """
     All-gather sharded parameters from the FSDP model to reconstruct full
     parameter tensors. Replicated parameters are returned as-is.
@@ -91,7 +90,7 @@ def fsdp_gather_full_params(fsdp_model: torch.nn.Module) -> dict[str, torch.Tens
     Returns:
         State dictionary mapping parameter names to full (unsharded) tensors.
     """
-    raise NotImplementedError
+    return fsdp_model.gather_full_params()
 
 
 def get_sharded_optimizer(params, optimizer_cls: type[torch.optim.Optimizer], **kwargs) -> torch.optim.Optimizer:
