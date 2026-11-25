@@ -104,13 +104,18 @@ class FSDP(nn.Module):
 
         #保存上一次前向中，分片层实际执行的顺序
         self._forward_order: list[nn.Module] = []
+        #记录这一次前向实际执行了哪些分片层
         self._current_order: list[nn.Module] = []
+        #_prefetched 保存正在预取的一层，内容是 (层对象, 各参数的收集任务)。
         self._prefetched: tuple[nn.Module, dict[str, _Gather]] | None = None
+        #按 CUDA 设备保存梯度归约流
         self._gradient_streams: dict[torch.device, torch.cuda.Stream] = {}
+        #保存还没写入 param.grad 的本地梯度分片
         self._pending_gradients: list[tuple[nn.Parameter, Tensor, dist.Work | None]] = []
         for layer, params in self._layers.items():
             self._wrap_layer(layer, params)
 
+    #收集一个参数
     @torch.no_grad()
     def _gather(self, shard: _Shard, dtype: torch.dtype | None) -> _Gather:
         local = shard.parameter.detach().to(dtype=dtype)
@@ -122,15 +127,18 @@ class FSDP(nn.Module):
             full = local
         return _Gather(full[: shard.numel].view(shard.shape), work)
 
+    #收集一层的参数
     def _gather_layer(self, layer: nn.Module) -> dict[str, _Gather]:
         return {name: self._gather(self._shards[param], self.compute_dtype) for name, param in self._layers[layer].items()}
 
+    #清理没有用到的预取
     def _discard_prefetch(self) -> None:
         if self._prefetched is not None:
             for gather in self._prefetched[1].values():
                 gather.wait()
             self._prefetched = None
 
+    #准备当前层并预去下一层
     def _prepare_layer(self, layer: nn.Module) -> dict[str, _Gather]:
         position = len(self._current_order)
         self._current_order.append(layer)
@@ -156,7 +164,9 @@ class FSDP(nn.Module):
 
         @wraps(forward)
         def sharded_forward(*args, **kwargs):
+            #取到当前层的完整参数
             full_params = {name: gather.wait() for name, gather in self._prepare_layer(layer).items()}
+            #完整权重的内存地址和对应的_Shard
             storages = {weight.untyped_storage().data_ptr(): self._shards[params[name]] for name, weight in full_params.items() if weight.numel()}
 
             def pack(tensor: Tensor) -> Tensor | _SavedWeight:
@@ -212,6 +222,7 @@ class FSDP(nn.Module):
         # 混合精度下只写回被 renorm 修改的元素，保留其它元素的主权重精度。
         master.copy_(torch.where(updated != master.to(weight.dtype), updated.to(master.dtype), master))
 
+    #取回pack()保存的张量
     def _unpack(self, saved: Tensor | _SavedWeight) -> Tensor:
         if isinstance(saved, Tensor):
             return saved

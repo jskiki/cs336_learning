@@ -22,8 +22,11 @@ class ShardedOptimizer(Optimizer):
     ) -> None:
         self.rank = dist.get_rank()
         self.world_size = dist.get_world_size()
+        #每个元素已分配的参数元素数
         self._elements_by_rank = [0] * self.world_size
+        #记录参数张量和负责更新他的rank
         self._owners: dict[Tensor, int] = {}
+        #收集当前rank的参数组，用来创建内层优化器
         local_groups: list[dict[str, Any]] = []
         self._initial_local_groups: list[dict[str, Any]] | None = local_groups
 
@@ -35,10 +38,11 @@ class ShardedOptimizer(Optimizer):
         self._initial_local_groups = None
         self.defaults = self._local_optimizer.defaults
         self.state = self._local_optimizer.state
+        #把封装的优化器的默认参数同步到外层，为了封装的外层也有完整的配置，不同步其实也能执行更新
         for group, local_group in zip(self.param_groups, self._local_optimizer.param_groups, strict=True):
             for key, value in local_group.items():
                 if key not in ("params", "param_names"):
-                    group.setdefault(key, value)
+                    group.setdefault(key, value) #还有一次判断，缺少时才会填入
 
     def add_param_group(self, param_group: dict[str, Any]) -> None:
         """注册完整参数组，供外层 zero_grad 和学习率调度使用。"""
@@ -71,10 +75,6 @@ class ShardedOptimizer(Optimizer):
                 raise
         self._owners.update(owners)
         self._elements_by_rank = elements_by_rank
-
-    def parameter_owner(self, param: Tensor) -> int:
-        """返回负责更新该参数的 rank。"""
-        return self._owners[param]
 
     def step(self, closure: Callable[[], Any] | None = None, **kwargs: Any) -> Any:
         """更新本地分片，随后同步更新后的模型参数。"""
