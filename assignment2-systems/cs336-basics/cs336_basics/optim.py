@@ -2,9 +2,10 @@
 
 from collections.abc import Callable, Iterable
 from math import cos, pi, sqrt
+from typing import Any
 
 import torch
-from torch import Tensor, no_grad, stack
+from torch import no_grad, stack
 from torch.linalg import vector_norm
 from torch.nn import Parameter
 
@@ -46,7 +47,7 @@ class AdamW(torch.optim.Optimizer):
 
     # 装饰器，执行这个函数时，不记录其中运算的自动求导计算图
     @torch.no_grad()
-    def step(self, closure: Callable[[], Tensor] | None = None) -> Tensor | None:
+    def step(self, closure: Callable[[], Any] | None = None) -> Any:
         """执行一次更新；梯度应已由外部的 loss.backward() 计算。
 
         参数更新不记录计算图；closure 如需重新计算损失，则启用梯度。
@@ -81,17 +82,17 @@ class AdamW(torch.optim.Optimizer):
                 # TODO 3：按题目计算偏差修正后的学习率。
                 # 这里已经计算了偏差修正，后面直接用m和v就行
                 lr_t = lr * sqrt(1 - beta2**t) / (1 - beta1**t)
-                # TODO 4：按题目顺序应用解耦的权重衰减。
+                # TODO 4：按题目顺序原地应用解耦的权重衰减，避免创建额外临时张量。
                 grad = p.grad
-                p.data -= lr * weight_decay * p.data
-                # TODO 5：根据 p.grad 更新一阶和二阶矩估计。
-                m = beta1 * m + (1 - beta1) * grad
-                v = beta2 * v + (1 - beta2) * grad**2
-                # TODO 6：根据矩估计原地更新参数，并保存状态。
-                p.data -= lr_t * m / (v.sqrt() + eps)
+                if weight_decay != 0.0:
+                    p.mul_(1.0 - lr * weight_decay)
+                # TODO 5：根据 p.grad 原地更新一阶和二阶矩估计。
+                m.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+                v.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+                # TODO 6：根据矩估计原地更新参数，并保存更新计数。
+                denom = v.sqrt().add_(eps)
+                p.addcdiv_(m, denom, value=-lr_t)
                 state["t"] = t
-                state["m"] = m
-                state["v"] = v
 
         return loss
 

@@ -97,6 +97,10 @@ class ShardedOptimizer(Optimizer):
                     work.wait()
         return result
 
+    def parameter_owner(self, param: Tensor) -> int:
+        """返回负责更新该参数的 rank，供 OverlapDDP 的 gradient_owner 回调使用。"""
+        return self._owners[param]
+
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         """恢复同一 rank 上保存的优化器状态。"""
         super().load_state_dict(state_dict)
