@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import threading
 
 import torch
 import triton
@@ -23,7 +24,7 @@ from torch.autograd.function import once_differentiable
 _RCP_LN2: float = 1.4426950408889634
 _RCP_LN2_TL = tl.constexpr(1.4426950408889634)
 _LN2_TL = tl.constexpr(0.6931471805599453)
-_TMA_ALLOCATOR_SET: bool = False
+_ALLOCATOR_STATE = threading.local()
 
 
 def _make_configs(env_name: str, defaults: list[tuple[int, int, int, int]], full_tiles: tuple[tuple[int, int], ...], full_stages: tuple[int, ...]) -> list[triton.Config]:
@@ -59,12 +60,15 @@ _BWD_DKV_CONFIGS = _make_configs(
 )
 
 
+def _triton_alloc(size: int, align: int, stream: int | None) -> Tensor:
+    return torch.empty(size, dtype=torch.int8, device="cuda")
+
+
 def _ensure_tma_allocator() -> None:
-    """Triton 设备端 make_tensor_descriptor 需要注册全局显存分配器，用于存放 TMA 描述符。"""
-    global _TMA_ALLOCATOR_SET
-    if not _TMA_ALLOCATOR_SET:
-        triton.set_allocator(lambda size, align, stream: torch.empty(size, dtype=torch.int8, device="cuda"))
-        _TMA_ALLOCATOR_SET = True
+    """按线程注册 Triton 全局显存分配器（供 TMA 描述符与 Blackwell 大 tile scratch 使用）。"""
+    if hasattr(triton, "set_allocator") and not getattr(_ALLOCATOR_STATE, "initialized", False):
+        triton.set_allocator(_triton_alloc)
+        _ALLOCATOR_STATE.initialized = True
 
 
 def _can_use_tma(*tensors: Tensor, d: int) -> bool:
@@ -487,8 +491,7 @@ def _backward_once(ctx, grad_output: Tensor) -> tuple[Tensor | None, ...]:
     scale_log2 = scale * _RCP_LN2
     input_precision = _dot_precision(query.dtype)
     use_tma = _can_use_tma(query, keys, values, grad_output, grad_query, grad_keys, grad_values, d=d)
-    if use_tma:
-        _ensure_tma_allocator()
+    _ensure_tma_allocator()
 
     row_dot_tile = 128 if n_queries >= 128 else 32
     dq_grid = lambda meta: (triton.cdiv(n_queries, meta["Q_TILE_SIZE"]), batch_size)  # noqa: E731
@@ -532,8 +535,7 @@ class FlashAttention2Triton(torch.autograd.Function):
         scale_log2 = (d**-0.5) * _RCP_LN2
         input_precision = _dot_precision(query.dtype)
         use_tma = _can_use_tma(query, keys, values, output, d=d)
-        if use_tma:
-            _ensure_tma_allocator()
+        _ensure_tma_allocator()
 
         grid = lambda meta: (triton.cdiv(n_queries, meta["Q_TILE_SIZE"]), batch_size)  # noqa: E731
         with torch.cuda.device(Q.device):

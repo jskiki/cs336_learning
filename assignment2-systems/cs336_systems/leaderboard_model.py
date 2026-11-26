@@ -21,11 +21,11 @@ from torch.utils.checkpoint import checkpoint
 from cs336_basics.layers import Embedding, Linear, RMSNorm
 from cs336_systems.fused_cross_entropy import DeferredLMHead
 
-_HAS_TRITON = False
+_FLASH_ATTENTION_OPT: type[torch.autograd.Function] | None = None
 try:
     from cs336_systems.flash_attention_triton_opt import FlashAttention2TritonOpt
 
-    _HAS_TRITON = True
+    _FLASH_ATTENTION_OPT = FlashAttention2TritonOpt
 except ImportError:
     pass
 
@@ -163,10 +163,9 @@ class _FastMultiHeadSelfAttention(nn.Module):
         q = self.rope(q, pos)
         k = self.rope(k, pos)
 
-        use_triton_fa = _HAS_TRITON and q.is_cuda and self.d_k >= 16 and (self.d_k & (self.d_k - 1)) == 0
-        if use_triton_fa:
+        if _FLASH_ATTENTION_OPT is not None and q.is_cuda and self.d_k >= 16 and (self.d_k & (self.d_k - 1)) == 0:
             bh = batch_flat * self.num_heads
-            attn = FlashAttention2TritonOpt.apply(
+            attn = _FLASH_ATTENTION_OPT.apply(
                 q.reshape(bh, seq_len, self.d_k),
                 k.reshape(bh, seq_len, self.d_k),
                 v.reshape(bh, seq_len, self.d_k),
