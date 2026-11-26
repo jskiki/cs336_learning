@@ -1,6 +1,6 @@
 import pytest
 import torch
-from einops import einsum, rearrange
+from einops import einsum
 
 from .adapters import (
     get_flashattention_autograd_function_pytorch,
@@ -51,12 +51,12 @@ def _test_flash_forward_pass(impl, device="cpu", is_causal=False):
     assert len(maybe_ls) == 1, (
         f"Expected one tensor of shape {q.shape[0], q.shape[1]} in saved tensors, but found {len(maybe_ls)}. The tests require you to save exactly one tensor of this shape, corresponding to the log-sum-exp of the attention scores."
     )
-    l = maybe_ls[0]
+    lse = maybe_ls[0]
 
     o_ref, l_ref = _attention_and_lse(q, k, v, is_causal)
 
     torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)
-    torch.testing.assert_close(l, l_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(lse, l_ref, rtol=1e-2, atol=1e-2)
 
 
 def test_flash_forward_pass_pytorch():
@@ -103,3 +103,25 @@ def test_flash_backward_triton(is_causal):
     torch.testing.assert_close(dq_expected, q.grad, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dk_expected, k.grad, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dv_expected, v.grad, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="A GPU must be available to run Triton kernels")
+@pytest.mark.parametrize("use_tma", [False, True])
+def test_optimized_flash_bf16_causal_tail(monkeypatch, use_tma):
+    from cs336_systems.flash_attention_triton_opt import FlashAttention2TritonOpt, _can_use_tma
+
+    monkeypatch.setenv("CS336_FLASH_USE_TMA", "1" if use_tma else "0")
+    torch.manual_seed(0)
+    shape = (2, 129, 128)
+    inputs = [torch.randn(shape, device="cuda", dtype=torch.bfloat16, requires_grad=True) for _ in range(3)]
+    if use_tma and not _can_use_tma(*inputs, d=shape[-1]):
+        pytest.skip("TMA is unavailable on this CUDA device")
+    grad_output = torch.randn_like(inputs[0])
+    reference_inputs = [tensor.detach().float().requires_grad_() for tensor in inputs]
+    expected, _ = _attention_and_lse(*reference_inputs, is_causal=True)
+    actual = FlashAttention2TritonOpt.apply(*inputs, True)
+    torch.testing.assert_close(actual.float(), expected, rtol=2e-2, atol=2e-2)
+    expected_grads = torch.autograd.grad(expected, reference_inputs, grad_output.float())
+    actual_grads = torch.autograd.grad(actual, inputs, grad_output)
+    for actual_grad, expected_grad in zip(actual_grads, expected_grads, strict=True):
+        torch.testing.assert_close(actual_grad.float(), expected_grad, rtol=2e-2, atol=2e-2)

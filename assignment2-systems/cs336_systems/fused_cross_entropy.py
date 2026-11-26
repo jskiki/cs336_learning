@@ -47,7 +47,8 @@ try:
 
         lse_log2 = row_max + tl.log2(row_sum)
         target_idx = tl.load(targets_ptr + row).to(tl.int64)
-        target_logit = tl.load(row_ptr + target_idx).to(tl.float32)
+        target_valid = (target_idx >= 0) & (target_idx < V)
+        target_logit = tl.load(row_ptr + target_idx, mask=target_valid, other=0).to(tl.float32)
         tl.store(losses_ptr + row, lse_log2 * _LN2_TL - target_logit)
 
         # 第二遍：原地写出 d_logits = (softmax(x) - one_hot(target)) / N，零额外 [C, V] 显存分配。
@@ -103,6 +104,8 @@ class _FusedLinearCrossEntropy(torch.autograd.Function):
         total_loss = torch.zeros((), device=hidden.device, dtype=torch.float32)
         inv_n = 1.0 / float(n_tokens)
         use_triton = _HAS_TRITON and hidden.is_cuda
+        if use_triton:
+            torch._assert_async(((targets_1d >= 0) & (targets_1d < vocab_size)).all(), "cross_entropy target out of range")
 
         weight_t = weight.T
         if use_triton:
@@ -173,6 +176,10 @@ class _FusedLinearCrossEntropy(torch.autograd.Function):
 
 def fused_linear_cross_entropy(hidden: Tensor, weight: Tensor, targets: Tensor, chunk_size: int = 2048) -> Tensor:
     """计算 mean(cross_entropy(hidden @ weight.T, targets))，不物化全量 logits。"""
+    if chunk_size <= 0:
+        raise ValueError("chunk_size 必须为正数")
+    if hidden.device != weight.device or targets.device != hidden.device:
+        raise ValueError("hidden、weight 和 targets 必须位于同一设备")
     return _FusedLinearCrossEntropy.apply(hidden, weight, targets, chunk_size, torch.is_grad_enabled())
 
 

@@ -76,7 +76,7 @@ def verify_equivalence(device: torch.device, dtype: torch.dtype, compile_ops: bo
     # 1. 全量 logits 一致性校验
     with torch.no_grad():
         base_logits = base_model(labels)
-        opt_logits = opt_model(labels, return_logits=True)
+        opt_logits = opt_model(labels)
     max_logits_diff = (base_logits.float() - opt_logits.float()).abs().max().item()
 
     # 2. 完整前向 + 融合交叉熵 + 反向 + AdamW 更新一致性校验
@@ -88,35 +88,51 @@ def verify_equivalence(device: torch.device, dtype: torch.dtype, compile_ops: bo
     base_loss.backward()
 
     opt_opt.zero_grad(set_to_none=True)
-    opt_loss = fused_cross_entropy(opt_model(labels), targets, chunk_size=64).sum()
+    opt_loss = fused_cross_entropy(opt_model(labels, return_logits=False), targets, chunk_size=64).sum()
     opt_loss.backward()
 
     loss_diff = abs(base_loss.item() - opt_loss.item())
     opt_params = dict(opt_model.named_parameters())
     grad_diffs = []
+    initial_params = {}
+    grad_atol, grad_rtol = (5e-4, 0.05) if dtype == torch.bfloat16 else (1e-5, 1e-3)
     for name, p_b in base_model.named_parameters():
         g_b = p_b.grad
         g_o = opt_params[name].grad
-        if g_b is not None and g_o is not None:
-            grad_diffs.append((g_b.float() - g_o.float()).abs().max().item())
+        assert g_b is not None and g_o is not None, f"{name} 缺少梯度"
+        torch.testing.assert_close(g_o, g_b, rtol=grad_rtol, atol=grad_atol, msg=lambda msg: f"{name} 梯度不一致\n{msg}")
+        grad_diffs.append((g_b.float() - g_o.float()).abs().max().item())
+        initial_params[name] = p_b.detach().float().clone()
     max_grad_diff = max(grad_diffs)
 
     base_opt.step()
     opt_opt.step()
-    max_param_diff = max(
-        (p_b.float() - opt_params[name].float()).abs().max().item()
-        for name, p_b in base_model.named_parameters()
-    )
+    param_diffs = []
+    update_error_sq = 0.0
+    reference_update_sq = 0.0
+    for name, p_b in base_model.named_parameters():
+        expected = p_b.detach().float()
+        actual = opt_params[name].detach().float()
+        diff = actual - expected
+        param_diffs.append(diff.abs().max().item())
+        update_error_sq += diff.square().sum().item()
+        reference_update_sq += (expected - initial_params[name]).square().sum().item()
+    max_param_diff = max(param_diffs)
+    assert reference_update_sq > 0, "AdamW 基准没有产生参数更新"
+    relative_update_error = (update_error_sq / reference_update_sq) ** 0.5
 
     tol = 2e-2 if dtype == torch.bfloat16 else 1e-3
     assert loss_diff <= tol, f"Loss 偏差过大：{loss_diff}"
     assert max_logits_diff <= tol * 5, f"Logits 偏差过大：{max_logits_diff}"
     assert max_param_diff <= tol, f"更新后权重偏差过大：{max_param_diff}"
+    update_tol = 0.25 if dtype == torch.bfloat16 else 0.05
+    assert relative_update_error <= update_tol, f"AdamW 更新量相对误差过大：{relative_update_error}"
     return {
         "max_logits_diff": max_logits_diff,
         "loss_diff": loss_diff,
         "max_grad_diff": max_grad_diff,
         "max_param_diff": max_param_diff,
+        "relative_update_error": relative_update_error,
     }
 
 
@@ -209,7 +225,7 @@ def _benchmark_worker(rank: int, args: argparse.Namespace) -> None:
 
         def train_step() -> None:
             optimizer.zero_grad(set_to_none=True)
-            res = model(labels)
+            res = model(labels, return_logits=False)
             loss = fused_cross_entropy(res, targets, chunk_size=args.chunk_size).sum()
             loss.backward()
             model.finish_gradient_synchronization()
@@ -360,6 +376,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.rep_ms = 5_000
     if args.batch_size < WORLD_SIZE or args.batch_size % WORLD_SIZE != 0:
         parser.error("batch_size 必须是 2 的正整数倍")
+    if args.chunk_size <= 0:
+        parser.error("chunk_size 必须为正数")
     return args
 
 

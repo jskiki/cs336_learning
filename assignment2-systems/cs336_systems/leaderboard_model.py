@@ -159,7 +159,9 @@ class _FastMultiHeadSelfAttention(nn.Module):
         k = self.k_proj(x).view(batch_flat, seq_len, self.num_heads, self.d_k).transpose(1, 2)
         v = self.v_proj(x).view(batch_flat, seq_len, self.num_heads, self.d_k).transpose(1, 2)
 
-        pos = token_positions.reshape(batch_flat, 1, seq_len) if token_positions is not None else None
+        pos = None
+        if token_positions is not None:
+            pos = token_positions.broadcast_to((*lead_dims, seq_len)).reshape(batch_flat, 1, seq_len)
         q = self.rope(q, pos)
         k = self.rope(k, pos)
 
@@ -299,7 +301,7 @@ class LeaderboardTransformerLM(nn.Module):
         self.ln_final = _FastRMSNorm(self.d_model, eps=eps, device=device, dtype=param_dtype, compile_ops=compile_ops)
         self.lm_head = _FusedLMHead(self.d_model, self.vocab_size, device=device, dtype=param_dtype, defer_projection=fuse_lm_head)
 
-    def forward(self, token_ids: Tensor, token_positions: Tensor | None = None, *, return_logits: bool = False) -> Any:
+    def forward(self, token_ids: Tensor, token_positions: Tensor | None = None, *, return_logits: bool = True) -> Tensor | DeferredLMHead:
         hidden_states = self.token_embeddings(token_ids)
         for idx, layer in enumerate(self.layers):
             if self.checkpoint_mode == "full" and idx < self.checkpoint_layers and self.training and torch.is_grad_enabled():

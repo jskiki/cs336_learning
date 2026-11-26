@@ -91,6 +91,20 @@ class FusedAdamW(torch.optim.Optimizer):
         self.state_dtype = state_dtype
         self.block_size = block_size
 
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        super().load_state_dict(state_dict)
+        if self.state_dtype is None:
+            return
+        for saved_group, group in zip(state_dict["param_groups"], self.param_groups, strict=True):
+            for saved_id, param in zip(saved_group["params"], group["params"], strict=True):
+                saved = state_dict["state"].get(saved_id)
+                if not saved:
+                    continue
+                for name in ("m", "v"):
+                    # Optimizer.load_state_dict 会把矩状态转换为参数 dtype。
+                    # 直接从 checkpoint 恢复配置的精度，避免先经历一次低精度舍入。
+                    self.state[param][name] = saved[name].to(device=param.device, dtype=self.state_dtype, copy=True)
+
     @torch.no_grad()
     def step(self, closure: Callable[[], Any] | None = None) -> Any:
         loss = None

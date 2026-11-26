@@ -103,5 +103,19 @@ class ShardedOptimizer(Optimizer):
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         """恢复同一 rank 上保存的优化器状态。"""
-        super().load_state_dict(state_dict)
-        self._local_optimizer.state = self.state
+        super().load_state_dict(state_dict | {"state": {}})
+        local_groups = []
+        local_ids = set()
+        parameter_ids = set()
+        for saved_group, group in zip(state_dict["param_groups"], self.param_groups, strict=True):
+            indices = [i for i, param in enumerate(group["params"]) if self._owners[param] == self.rank]
+            saved_ids = [saved_group["params"][i] for i in indices]
+            local_group = saved_group | {"params": saved_ids}
+            if "param_names" in saved_group:
+                local_group["param_names"] = [saved_group["param_names"][i] for i in indices]
+            local_groups.append(local_group)
+            local_ids.update(saved_ids)
+            parameter_ids.update(saved_group["params"])
+        local_state = {key: value for key, value in state_dict["state"].items() if key in local_ids or key not in parameter_ids}
+        self._local_optimizer.load_state_dict({"state": local_state, "param_groups": local_groups})
+        self.state = self._local_optimizer.state
