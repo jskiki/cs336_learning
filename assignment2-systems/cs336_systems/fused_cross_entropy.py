@@ -98,8 +98,8 @@ class _FusedLinearCrossEntropy(torch.autograd.Function):
         need_d_weight = needs_grad and weight.requires_grad
 
         grad_hidden = torch.empty_like(hidden_2d) if need_d_hidden else None
-        # 权重梯度跨 chunk 用 FP32 累加，避免长序列分块叠加时的 BF16 舍入漂移。
-        grad_weight_fp32 = torch.zeros_like(weight, dtype=torch.float32) if need_d_weight else None
+        # 首块覆盖缓冲区，后续块直接累加，省去预先清零。
+        grad_weight_fp32 = torch.empty_like(weight, dtype=torch.float32) if need_d_weight else None
 
         total_loss = torch.zeros((), device=hidden.device, dtype=torch.float32)
         inv_n = 1.0 / float(n_tokens)
@@ -151,7 +151,17 @@ class _FusedLinearCrossEntropy(torch.autograd.Function):
             if grad_hidden is not None:
                 grad_hidden[start:end] = d_logits @ weight
             if grad_weight_fp32 is not None:
-                grad_weight_fp32.add_(d_logits.T @ h_chunk)
+                beta = 0 if start == 0 else 1
+                if d_logits.dtype == h_chunk.dtype == torch.float32:
+                    grad_weight_fp32.addmm_(d_logits.T, h_chunk, beta=beta)
+                elif d_logits.is_cuda and d_logits.dtype == h_chunk.dtype and d_logits.dtype in (torch.float16, torch.bfloat16):
+                    torch.addmm(grad_weight_fp32, d_logits.T, h_chunk, beta=beta, out_dtype=torch.float32, out=grad_weight_fp32)
+                else:
+                    chunk_grad = d_logits.T @ h_chunk
+                    if beta == 0:
+                        grad_weight_fp32.copy_(chunk_grad)
+                    else:
+                        grad_weight_fp32.add_(chunk_grad)
 
         loss = total_loss * inv_n
         saved_grad_hidden = grad_hidden.view(orig_shape) if grad_hidden is not None else None
